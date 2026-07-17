@@ -6,15 +6,12 @@
 
 import * as THREE from 'three';
 import { World } from './world';
-import { POND, MUD, GATES } from './constants';
 import {
   buildCapybara, buildTourist, buildKeeper, buildDrone, buildDart, buildFoodMesh,
   buildEnvironment, mat,
 } from './meshes';
 import type { CapybaraRig, TouristRig, KeeperRig, DroneRig, EnvRefs } from './meshes';
 import { ParticleSystem } from './particles';
-import type { GameEvent } from './types';
-import * as THREE_CORE from 'three';
 
 const _v = new THREE.Vector3();
 
@@ -381,8 +378,10 @@ export class GameScene {
       } else {
         rig.inner.rotation.x = 0;
       }
-      // soaked drip tint
-      rig.body.material = t.soak > 0 ? mat(0x3a5a8c) : rig.body.material;
+      // soaked tint
+      if (t.soak > 0) {
+        rig.body.material = mat(0x3a5a8c);
+      }
       // hide item when dropped
       rig.itemHolder.visible = t.item !== 'none';
     }
@@ -400,7 +399,7 @@ export class GameScene {
       rig.armL.rotation.x = -Math.sin(this.time * runF + k.id) * Math.min(spd / 5, 1) * 0.6;
       rig.armR.rotation.x = Math.sin(this.time * runF + k.id) * Math.min(spd / 5, 1) * 0.6;
       rig.inner.position.y = Math.abs(Math.sin(this.time * runF)) * Math.min(spd / 8, 1) * 0.1;
-      // aiming: raise tranq gun + telegraph line
+      // aiming: raise tranq gun
       rig.gun.visible = k.mood === 'aim';
       if (k.mood === 'stunned') {
         rig.inner.rotation.z = Math.sin(this.time * 3 + k.id) * 0.12;
@@ -526,6 +525,3 @@ export class GameScene {
     this.renderer.render(this.scene, this.camera);
   }
 }
-
-// re-export for convenience in App
-export { THREE_CORE };
