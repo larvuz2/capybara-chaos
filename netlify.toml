@@ -1,0 +1,13 @@
+# Netlify deploy configuration for CAPYBARA CHAOS
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# SPA fallback (single-page game)
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
