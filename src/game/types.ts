@@ -23,6 +23,7 @@ export interface InputState {
   charge: boolean; // Shift hold (gamepad: RT)
   hide: boolean; // L / C        (gamepad: B) — edge-triggered by World
   splash: boolean; // Space      (gamepad: Y) — edge-triggered by World
+  spin: boolean; // U / E        (gamepad: RB) — edge-triggered by World
 }
 
 export interface InputSource {
@@ -37,6 +38,7 @@ export const emptyInput = (): InputState => ({
   charge: false,
   hide: false,
   splash: false,
+  spin: false,
 });
 
 /**
@@ -88,12 +90,14 @@ export interface PlayerState {
   biteCd: number;
   headbuttCd: number;
   splashCd: number;
+  spinCd: number;
   regenWait: number;
   // animation cues (consumed by renderer)
   animAttack: number; // >0 while bite lunge
   animHeadbutt: number;
   animSplash: number;
   animRoll: number;
+  animSpin: number; // >0 while spinning (fast y-rotation tween)
   squish: number; // squash & stretch impulse
   dead: boolean;
 }
@@ -110,7 +114,7 @@ export type TouristMood =
   | 'pond'
   | 'gone';
 
-export type ItemKind = 'none' | 'soda' | 'icecream' | 'selfie' | 'food' | 'camera';
+export type ItemKind = 'none' | 'soda' | 'icecream' | 'selfie' | 'food' | 'camera' | 'popcorn' | 'smoke';
 
 export type TouristExpression = 'calm' | 'surprised' | 'panic';
 
@@ -143,6 +147,9 @@ export interface TouristState {
   skin: number; // palette indices (renderer)
   shirt: number;
   pants: number;
+  hair: number; // hairstyle index (0 = bald, hats included)
+  hairColor: number; // HAIR_COLORS palette index (blonde is common)
+  glasses: boolean; // sunglasses
   hitCd: number; // per-tourist charge-hit cooldown
   // ---- tumble physics (push → crumple → fly → bounce → skid → dazed) ----
   tumble: number; // seconds of tumble remaining (safety timeout), 0 = grounded
@@ -167,7 +174,7 @@ export interface TouristState {
   fleeT: number; // time since panic started (repel → gate blend)
 }
 
-export type KeeperMood = 'patrol' | 'investigate' | 'chase' | 'aim' | 'stunned';
+export type KeeperMood = 'patrol' | 'investigate' | 'chase' | 'aim' | 'stunned' | 'fire';
 
 export interface KeeperState {
   id: number;
@@ -184,6 +191,7 @@ export interface KeeperState {
   memory: number; // seconds since last seen player
   dartCd: number;
   bob: number;
+  fireId: number; // fire being extinguished (-1 = none)
 }
 
 export interface DartState {
@@ -227,6 +235,61 @@ export interface DroneState {
 }
 
 // ---------------------------------------------------------------------------
+// Emergent chaos entities (plain data; meshes live in scene.ts)
+// ---------------------------------------------------------------------------
+
+/** Grass fire: ignited by a dropped cigarette, spreads, panics tourists,
+ *  diverted keepers stomp it out. Burns out into a scorch decal. */
+export interface FireState {
+  id: number;
+  x: number;
+  z: number;
+  t: number; // age
+  ttl: number; // burn time remaining
+  spreadT: number; // countdown to next spread roll
+  outT: number; // extinguish progress (keeper standing on it)
+  keeperId: number; // keeper currently claiming this fire (-1 = none)
+}
+
+/** Spilled popcorn on the ground; summons a gull flock after a short delay. */
+export interface SpillState {
+  id: number;
+  x: number;
+  z: number;
+  t: number; // age
+  ttl: number; // total lifetime (gone once the flock finished eating)
+  flockSpawned: boolean;
+}
+
+export type GullPhase = 'in' | 'eat' | 'out';
+
+/** A single seagull: swoops in from high altitude, hops & pecks at the
+ *  spill, then flies away. On the ground it startles nearby tourists. */
+export interface GullState {
+  id: number;
+  flock: number; // flock grouping id (one spill = one flock)
+  x: number;
+  y: number; // altitude (0 = on the ground)
+  z: number;
+  sx: number; // flight start point (swoop-in lerp)
+  sy: number;
+  sz: number;
+  tx: number; // hop target around the spill
+  tz: number;
+  phase: GullPhase;
+  t: number; // time in current phase
+  hopT: number; // countdown to next hop
+  seed: number; // per-bird animation phase
+}
+
+/** Burnt grass circle left after a fire goes out. */
+export interface ScorchState {
+  id: number;
+  x: number;
+  z: number;
+}
+
+// ---------------------------------------------------------------------------
 // Events emitted by World.step — consumed by renderer/audio/UI each frame.
 // ---------------------------------------------------------------------------
 export type GameEvent =
@@ -260,6 +323,8 @@ export interface RunStats {
   bowling: number; // 2+ tourists tumbled in one chain
   strikes: number; // 3+ tourists tumbled in one chain
   photos: number; // photog pictures taken of a calm Munch
+  fires: number; // grass fires ignited (dropped cigarettes + spread)
+  gulls: number; // seagull swarms summoned by popcorn spills
   bestCombo: number;
 }
 

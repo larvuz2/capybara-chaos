@@ -1,8 +1,8 @@
 // ============================================================================
 // LocalInput: keyboard implementation of InputSource.
 // (Gamepad mapping noted: Left stick = WASD, A = bite, X = headbutt,
-//  RT = charge, B = hide/roll, Y = splash — a GamepadInput would implement
-//  the same InputSource interface.)
+//  RT = charge, B = hide/roll, Y = splash, RB = spin — a GamepadInput would
+//  implement the same InputSource interface.)
 // ============================================================================
 
 import type { InputSource, InputState } from './types';
@@ -64,6 +64,7 @@ export class LocalInput implements InputSource {
     s.headbutt = this.consume('KeyK') || this.consume('KeyX');
     s.hide = this.consume('KeyL') || this.consume('KeyC');
     s.splash = this.consume('Space');
+    s.spin = this.consume('KeyU') || this.consume('KeyE');
     return s;
   }
 
