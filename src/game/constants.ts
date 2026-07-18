@@ -107,6 +107,62 @@ export const TOURIST = {
   scareRadiusBase: 3.2, // intimidation aura of the capybara
   dropChance: 0.65,
   slipBase: 0.06,
+  surprisedTime: 0.7, // deer-in-headlights freeze after any scare
+  surprisedSpeed: 0.12, // speed multiplier during the freeze
+};
+
+// Tumble physics: knockback launches tourists into a ballistic flip,
+// they bounce, skid, lie dazed, then flee. Exaggerated, not realistic.
+export const TUMBLE = {
+  gravity: 18, // m/s^2 downward
+  headbuttVYMin: 5.2, // high arc launch (~0.75-1.4m apex)
+  headbuttVYMax: 7.0,
+  chargeVYMin: 2.0, // low, fast, long tumble
+  chargeVYMax: 3.2,
+  biteVYMin: 2.4, // comedic hop
+  biteVYMax: 3.4,
+  biteForce: 5,
+  chargeForce: 10,
+  restitution: 0.4, // vy *= -restitution per bounce
+  bounceFric: 0.6, // horizontal kept per bounce
+  minBounceVY: 1.3, // below this impact speed → stop bouncing, start skidding
+  skidFric: 5.5, // ground friction while skidding
+  skidStop: 1.1, // below this speed → dazed
+  dazeMin: 1.0,
+  dazeMax: 1.5,
+  spinMin: 7, // flip rate rad/s
+  spinMax: 13,
+  chainRadius: 1.6, // bowling-pin overlap radius
+  chainFactor: 0.6, // fraction of velocity passed to chain victims
+  chainMinSpeed: 3.5, // chain victims at least this fast
+  chainVYMin: 3.2,
+  chainVYMax: 4.6,
+  propRadius: 1.5, // tumbling body topples trash cans within this radius
+  hitCd: 2.0, // can't be re-scared/re-hit while tumbling
+  maxTime: 3.5, // safety timeout
+  maxY: 3.0, // hard ceiling on the arc (juggling stays funny, not orbital)
+};
+
+// Photo tourists: approach a calm Munch for pictures
+export const PHOTO = {
+  chance: 0.3, // fraction of tourists that spawn with a camera
+  range: 14, // start approaching within this distance
+  stopMin: 3.2, // stop this far away to take the picture
+  stopVar: 1.3, // per-tourist extra stop distance
+  aimTime: 1.0, // camera raised this long before the shot
+  linger: 1.0, // admire the shot this long, then wander off
+  calmTime: 5, // only approach if Munch hasn't attacked for this long
+  abortTime: 0.7, // abort if an attack happened within this window
+  cdMin: 12, // cooldown before the same photog approaches again
+  cdMax: 22,
+};
+
+// Flee-away-from-player steering
+export const FLEE = {
+  repelTime: 1.5, // pure run-directly-away phase
+  blendTime: 1.0, // then blend toward the tourist gate over this long
+  shoveForce: 2.6, // panicked tourists shove calm ones they bump
+  shoveCd: 0.5,
 };
 
 export const KEEPER = {
@@ -146,6 +202,9 @@ export const CHAOS = {
   platform: 14,
   cart: 12,
   vip: 12,
+  bowling: 4,
+  strike: 8,
+  photo: 0, // being photographed is not chaos
   win: 100,
 };
 
@@ -159,6 +218,9 @@ export const SCORE = {
   platform: 100,
   cart: 40,
   vip: 50,
+  bowling: 30, // 2+ tumbled in one chain
+  strike: 60, // 3+ tumbled in one chain
+  photo: 5, // tiny — photogs snap a calm Munch
 };
 
 export const COMBO = { window: 4.0, max: 8 };

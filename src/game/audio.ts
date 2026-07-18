@@ -247,6 +247,24 @@ class AudioEngine {
         this.tone(t, 2000, 0.05, 'square', 0.1, B);
         this.noise(t, 0.06, 0.12, 9000, B, 'highpass');
         break;
+      case 'boing': {
+        // tumble bounce: springy up-chirp with a wobble
+        const f = 150 + Math.random() * 70;
+        this.tone(t, f, 0.16, 'sine', 0.35, B, f * 2.6);
+        this.tone(t + 0.03, f * 0.55, 0.14, 'triangle', 0.2, B, f * 1.4);
+        break;
+      }
+      case 'shutter':
+        // camera: click-clack
+        this.noise(t, 0.04, 0.28, 6500, B, 'highpass');
+        this.tone(t + 0.04, 2400, 0.05, 'square', 0.12, B, 1700);
+        break;
+      case 'tweet':
+        // dazed birdies circling the head
+        this.tone(t, 2300, 0.09, 'sine', 0.14, B, 2900);
+        this.tone(t + 0.12, 2700, 0.09, 'sine', 0.12, B, 2100);
+        this.tone(t + 0.24, 2500, 0.1, 'sine', 0.1, B, 3100);
+        break;
       case 'drone':
         this.tone(t, 220, 0.4, 'sawtooth', 0.05, B, 260);
         break;
