@@ -187,8 +187,14 @@ export interface TouristRig {
   inner: THREE.Group;
   body: THREE.Mesh;
   head: THREE.Group;
+  eyeL: THREE.Mesh;
+  eyeR: THREE.Mesh;
   pupilL: THREE.Mesh;
   pupilR: THREE.Mesh;
+  mouth: THREE.Mesh; // closed mouth (calm)
+  mouthO: THREE.Mesh; // open "O" mouth (surprised / panic)
+  browL: THREE.Mesh; // raised surprise brows
+  browR: THREE.Mesh;
   armL: THREE.Mesh;
   armR: THREE.Mesh;
   legL: THREE.Mesh;
@@ -234,9 +240,22 @@ export function buildTourist(t: TouristState): TouristRig {
   eyeL.add(pupilL);
   eyeR.add(pupilR);
   head.add(eyeL, eyeR);
-  // mouth
+  // mouth: closed line (calm) + open "O" (surprised/panic), toggled by expression
   const mouth = mesh(boxGeo(0.14, 0.06, 0.05), mat(0x7a4a35), 0, -0.16, 0.31, false);
   head.add(mouth);
+  const mouthO = mesh(sphGeo(0.08, 8, 6), mat(0x51232b), 0, -0.18, 0.29, false);
+  mouthO.scale.set(1, 1.3, 0.5);
+  mouthO.visible = false;
+  head.add(mouthO);
+  // raised surprise eyebrows (hidden while calm)
+  const browMat = mat(0x4a3220);
+  const browL = mesh(boxGeo(0.16, 0.035, 0.05), browMat, -0.15, 0.24, 0.3, false);
+  const browR = mesh(boxGeo(0.16, 0.035, 0.05), browMat, 0.15, 0.24, 0.3, false);
+  browL.rotation.z = 0.18;
+  browR.rotation.z = -0.18;
+  browL.visible = false;
+  browR.visible = false;
+  head.add(browL, browR);
   // hair / hat variety
   const hairRoll = (t.id * 7) % 5;
   if (t.vip) {
@@ -282,10 +301,19 @@ export function buildTourist(t: TouristState): TouristRig {
   } else if (t.item === 'food') {
     const snack = mesh(sphGeo(0.1, 7, 5), mat(0xe9c46a), 0, 0, 0, false);
     itemHolder.add(snack);
+  } else if (t.item === 'camera') {
+    // photo tourist: chunky camera body + lens + flash bulb
+    const camBody = mesh(boxGeo(0.24, 0.16, 0.1), mat(0x222831), 0, 0, 0, false);
+    const lens = mesh(cylGeo(0.055, 0.065, 0.12, 8), mat(0x101418), 0, 0, 0.1, false);
+    lens.rotation.x = Math.PI / 2;
+    const glass = mesh(cylGeo(0.045, 0.045, 0.02, 8), mat(0x66ccff, { flat: false, rough: 0.2 }), 0, 0, 0.16, false);
+    glass.rotation.x = Math.PI / 2;
+    const flashBulb = mesh(boxGeo(0.07, 0.05, 0.04), mat(0xf5f0e0, { emissive: 0xffffff, emissiveIntensity: 0.6 }), -0.07, 0.1, 0.02, false);
+    itemHolder.add(camBody, lens, glass, flashBulb);
   }
 
   group.scale.setScalar(t.scale);
-  return { group, inner, body, head, pupilL, pupilR, armL, armR, legL, legR, itemHolder };
+  return { group, inner, body, head, eyeL, eyeR, pupilL, pupilR, mouth, mouthO, browL, browR, armL, armR, legL, legR, itemHolder };
 }
 
 // ============================================================================
