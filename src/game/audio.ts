@@ -272,6 +272,30 @@ class AudioEngine {
         this.noise(t, 0.3, 0.4, 1500, B);
         this.tone(t, 140, 0.3, 'square', 0.25, B, 60);
         break;
+      case 'whoosh':
+        // spin attack: big airy sweep + low whomp
+        this.noise(t, 0.38, 0.4, 900, B, 'bandpass');
+        this.noise(t + 0.05, 0.3, 0.25, 2400, B, 'bandpass');
+        this.tone(t, 160, 0.3, 'sine', 0.35, B, 55);
+        break;
+      case 'fire': {
+        // crackle: a scatter of tiny pops over a low rumble
+        this.noise(t, 0.5, 0.12, 320, B);
+        for (let i = 0; i < 6; i++) {
+          this.noise(t + i * 0.05 + Math.random() * 0.04, 0.04, 0.2, 2200 + Math.random() * 2600, B, 'bandpass');
+        }
+        break;
+      }
+      case 'squawk':
+        // seagull cry: two descending square-wave screeches
+        this.tone(t, 1350, 0.16, 'square', 0.16, B, 720);
+        this.tone(t + 0.13, 1180, 0.14, 'square', 0.13, B, 590);
+        break;
+      case 'sizzle':
+        // extinguished: steam hiss
+        this.noise(t, 0.45, 0.3, 6500, B, 'highpass');
+        this.noise(t, 0.3, 0.18, 1800, B);
+        break;
       case 'ui':
         this.tone(t, 660, 0.06, 'sine', 0.15, B, 880);
         break;

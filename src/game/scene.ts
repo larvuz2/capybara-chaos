@@ -5,14 +5,14 @@
 // ============================================================================
 
 import * as THREE from 'three';
-import { PLATFORM, STAGES, ARENA } from './constants';
+import { PLATFORM, STAGES, ARENA, SPIN } from './constants';
 import type { World } from './world';
 import type { TouristState, KeeperState } from './types';
 import {
   buildCapybara, buildTourist, buildKeeper, buildDrone, buildDart, buildFoodMesh,
-  buildEnvironment,
+  buildEnvironment, buildFire, buildSpill, buildGull, buildScorch,
 } from './meshes';
-import type { CapybaraRig, TouristRig, KeeperRig, DroneRig, EnvRefs } from './meshes';
+import type { CapybaraRig, TouristRig, KeeperRig, DroneRig, EnvRefs, FireRig, GullRig } from './meshes';
 import { ParticleSystem } from './particles';
 import { audio } from './audio';
 
@@ -44,6 +44,10 @@ export class GameScene {
   private keeperRigs = new Map<number, KeeperRig>();
   private dartMeshes = new Map<number, THREE.Group>();
   private foodMeshes = new Map<number, THREE.Group>();
+  private fireRigs = new Map<number, FireRig>();
+  private spillMeshes = new Map<number, THREE.Group>();
+  private gullRigs = new Map<number, GullRig>();
+  private scorchMeshes = new Map<number, THREE.Mesh>();
   private aimLines: THREE.Line[] = [];
   private sun: THREE.DirectionalLight;
   private hemi: THREE.HemisphereLight;
@@ -133,6 +137,14 @@ export class GameScene {
     this.dartMeshes.clear();
     for (const m of this.foodMeshes.values()) this.scene.remove(m);
     this.foodMeshes.clear();
+    for (const rig of this.fireRigs.values()) this.scene.remove(rig.group);
+    this.fireRigs.clear();
+    for (const m of this.spillMeshes.values()) this.scene.remove(m);
+    this.spillMeshes.clear();
+    for (const rig of this.gullRigs.values()) this.scene.remove(rig.group);
+    this.gullRigs.clear();
+    for (const m of this.scorchMeshes.values()) this.scene.remove(m);
+    this.scorchMeshes.clear();
     for (const line of this.aimLines) line.visible = false;
     this.eventId = '';
     this.shake = 0;
@@ -280,6 +292,13 @@ export class GameScene {
       const k = 1 - p.animRoll / 0.5;
       c.inner.rotation.x = k * Math.PI * 2;
     }
+    // spin attack: two full turns of the inner body over SPIN.anim seconds
+    if (p.animSpin > 0) {
+      const k = 1 - p.animSpin / SPIN.anim;
+      c.inner.rotation.y = k * Math.PI * 4;
+    } else {
+      c.inner.rotation.y = 0;
+    }
     // grumpy blink
     this.blinkT -= dt;
     const blink = this.blinkT < 0.12;
@@ -376,6 +395,124 @@ export class GameScene {
       if (!seenF.has(id)) {
         this.scene.remove(m);
         this.foodMeshes.delete(id);
+      }
+    }
+
+    // ---------------- grass fires ----------------
+    const seenFi = new Set<number>();
+    for (const f of world.fires.values()) {
+      seenFi.add(f.id);
+      let rig = this.fireRigs.get(f.id);
+      if (!rig) {
+        rig = buildFire();
+        this.fireRigs.set(f.id, rig);
+        this.scene.add(rig.group);
+      }
+      rig.group.position.set(f.x, 0, f.z);
+      // flicker: flames pulse & twist, light breathes
+      rig.flames.forEach((fl, i) => {
+        const ph = this.time * (13 + i * 3) + f.id * 2.1 + i * 1.7;
+        const s = 0.85 + Math.sin(ph) * 0.18 + Math.sin(ph * 2.7) * 0.08;
+        fl.scale.set(1 / Math.sqrt(s), s, 1 / Math.sqrt(s));
+        fl.rotation.y = this.time * (1.5 + i * 0.7) + i;
+      });
+      rig.light.intensity = 9 + Math.sin(this.time * 21 + f.id) * 2.5 + Math.sin(this.time * 47) * 1.2;
+      const glowMat = rig.glow.material as THREE.MeshBasicMaterial;
+      glowMat.opacity = 0.18 + Math.sin(this.time * 9 + f.id) * 0.05;
+      // fade in/out at the ends of life
+      const fade = Math.min(1, f.t * 3, Math.max(0.05, f.ttl / 2));
+      rig.group.scale.setScalar(Math.max(0.05, fade));
+      // being stomped out: shrink faster
+      if (f.outT > 0) rig.group.scale.multiplyScalar(Math.max(0.25, 1 - f.outT / 4));
+    }
+    for (const [id, rig] of this.fireRigs) {
+      if (!seenFi.has(id)) {
+        this.scene.remove(rig.group);
+        this.fireRigs.delete(id);
+      }
+    }
+
+    // ---------------- scorch decals ----------------
+    const seenSc = new Set<number>();
+    for (const s of world.scorches) {
+      seenSc.add(s.id);
+      let m = this.scorchMeshes.get(s.id);
+      if (!m) {
+        m = buildScorch();
+        m.position.set(s.x, 0.035, s.z);
+        m.rotation.z = s.id * 1.7;
+        this.scorchMeshes.set(s.id, m);
+        this.scene.add(m);
+      }
+    }
+    for (const [id, m] of this.scorchMeshes) {
+      if (!seenSc.has(id)) {
+        this.scene.remove(m);
+        this.scorchMeshes.delete(id);
+      }
+    }
+
+    // ---------------- popcorn spills ----------------
+    const seenSp = new Set<number>();
+    for (const s of world.spills.values()) {
+      seenSp.add(s.id);
+      let m = this.spillMeshes.get(s.id);
+      if (!m) {
+        m = buildSpill();
+        m.rotation.y = s.id * 2.3;
+        this.spillMeshes.set(s.id, m);
+        this.scene.add(m);
+      }
+      m.position.set(s.x, 0, s.z);
+      const pop = Math.min(1, s.t * 5); // pop-in
+      m.scale.setScalar(Math.max(0.05, pop));
+    }
+    for (const [id, m] of this.spillMeshes) {
+      if (!seenSp.has(id)) {
+        this.scene.remove(m);
+        this.spillMeshes.delete(id);
+      }
+    }
+
+    // ---------------- seagulls ----------------
+    const seenG = new Set<number>();
+    for (const g of world.gulls.values()) {
+      seenG.add(g.id);
+      let rig = this.gullRigs.get(g.id);
+      if (!rig) {
+        rig = buildGull();
+        this.gullRigs.set(g.id, rig);
+        this.scene.add(rig.group);
+      }
+      rig.group.position.set(g.x, g.y, g.z);
+      const flying = g.phase !== 'eat';
+      if (flying) {
+        // face travel direction, fast flap
+        rig.group.rotation.y = g.phase === 'out' ? g.seed : Math.atan2(g.tx - g.x, g.tz - g.z);
+        const flap = Math.sin(this.time * 16 + g.seed * 7) * 0.75;
+        rig.wingL.rotation.z = flap;
+        rig.wingR.rotation.z = -flap;
+        rig.body.rotation.x = 0.15;
+        rig.body.position.y = Math.sin(this.time * 16 + g.seed * 7) * 0.04;
+      } else {
+        // on the ground: face hop target, little wing settles + pecking
+        const dx = g.tx - g.x;
+        const dz = g.tz - g.z;
+        if (dx * dx + dz * dz > 0.02) rig.group.rotation.y = Math.atan2(dx, dz);
+        const settle = Math.max(0, 1 - g.t * 2);
+        const flap = Math.sin(this.time * 20 + g.seed * 7) * 0.6 * settle;
+        rig.wingL.rotation.z = flap;
+        rig.wingR.rotation.z = -flap;
+        // peck: head dips in bursts
+        const peck = Math.max(0, Math.sin(this.time * 6 + g.seed * 9));
+        rig.body.rotation.x = peck > 0.75 ? 0.55 : 0;
+        rig.body.position.y = Math.abs(Math.sin(this.time * 10 + g.seed)) * 0.05 * Math.min(g.t * 3, 1);
+      }
+    }
+    for (const [id, rig] of this.gullRigs) {
+      if (!seenG.has(id)) {
+        this.scene.remove(rig.group);
+        this.gullRigs.delete(id);
       }
     }
 
@@ -604,6 +741,10 @@ export class GameScene {
     }
     // item hidden once dropped
     rig.itemHolder.visible = t.item !== 'none';
+    // smoker: faint gray puff about once a second
+    if (t.item === 'smoke' && Math.random() < dt * 1) {
+      this.particles.spawn('smoke', t.x, t.z, 1, 1.55 * t.scale);
+    }
     // VIP sparkle
     if (t.vip && Math.random() < dt * 2) {
       this.particles.spawn('spark', t.x, t.z, 1, 1.8);
