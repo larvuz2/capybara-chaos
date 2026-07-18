@@ -1,547 +1,690 @@
 // ============================================================================
-// CAPYBARA CHAOS: Zoo Shutdown — app shell.
-// React owns screens (title / howto / shop / HUD / pause / end) and DOM popups;
-// GameScene + World own the 3D sim. UI reads a HUD snapshot each frame.
+// CAPYBARA CHAOS: Zoo Shutdown — React shell.
+// Hosts the fullscreen Three.js canvas + all HTML/CSS HUD overlays & screens.
 // ============================================================================
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import {
-  Play, ShoppingBag, HelpCircle, X, Volume2, VolumeX, Pause, RotateCcw,
-  Wind, Zap, Megaphone, HeartPulse, EyeOff, Hammer, Waves, Flame, PawPrint,
-  Apple, Backpack, CloudRain, Crown, Cake, Video, DoorOpen, ShoppingCart, Trophy,
+  Wind, Zap, Megaphone, HeartPulse, EyeOff, Volume2, VolumeX, Hammer, Waves,
+  Apple, Backpack, CloudRain, Crown, Cake, Video, DoorOpen, ShoppingCart,
+  PawPrint, Flame, Play, Pause, RotateCcw, Home, ShoppingBag, HelpCircle, Trophy,
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { World } from './game/world';
-import { GameScene } from './game/scene';
 import { LocalInput } from './game/input';
 import { LocalLoopback } from './game/types';
-import { EVENTS, UPGRADES, STAGES } from './game/constants';
-import type { EventId } from './game/constants';
-import { loadMeta, saveMeta, tryPurchase } from './game/meta';
-import type { MetaState } from './game/meta';
-import type { HudSnapshot } from './game/types';
+import { GameScene } from './game/scene';
+import type { UiPopup, UiNotice } from './game/scene';
 import { audio } from './game/audio';
+import { loadMeta, saveMeta, tryPurchase, upgradeCost } from './game/meta';
+import type { MetaState } from './game/meta';
+import { EVENTS, UPGRADES, STAGES, SCORE } from './game/constants';
+import type { HudSnapshot, RunStats } from './game/types';
 
-type Screen = 'title' | 'howto' | 'shop' | 'game';
+type Screen = 'title' | 'howto' | 'shop' | 'playing' | 'paused' | 'end';
 
 interface Popup {
   id: number;
-  x: number;
-  y: number;
+  sx: number;
+  sy: number;
   text: string;
   cls: string;
 }
+interface Banner {
+  id: number;
+  title: string;
+  sub: string;
+  color: string;
+}
+interface EndData {
+  result: 'win' | 'caught';
+  score: number;
+  cp: number;
+  chaos: number;
+  bestCombo: number;
+  stats: RunStats;
+}
+interface GameCtl {
+  scene: GameScene;
+  input: LocalInput;
+  net: LocalLoopback;
+  world: World;
+}
 
-const EVENT_ICONS: Record<EventId, typeof Apple> = {
-  feeding: Apple,
-  fieldtrip: Backpack,
-  rain: CloudRain,
-  vip: Crown,
-  birthday: Cake,
-  tvcrew: Video,
-  gateopen: DoorOpen,
-  foodcart: ShoppingCart,
+const ICONS: Record<string, LucideIcon> = {
+  wind: Wind, zap: Zap, megaphone: Megaphone, 'heart-pulse': HeartPulse,
+  'eye-off': EyeOff, 'volume-2': Volume2, hammer: Hammer, waves: Waves,
+  apple: Apple, backpack: Backpack, 'cloud-rain': CloudRain, crown: Crown,
+  cake: Cake, video: Video, 'door-open': DoorOpen, 'shopping-cart': ShoppingCart,
 };
 
-const UPGRADE_ICONS: Record<string, typeof Wind> = {
-  wind: Wind,
-  zap: Zap,
-  megaphone: Megaphone,
-  'heart-pulse': HeartPulse,
-  'eye-off': EyeOff,
-  hammer: Hammer,
-  waves: Waves,
-  'volume-2': Volume2,
-};
-
-let popupId = 0;
+const BREAKDOWN: { key: keyof RunStats; label: string; pts: number }[] = [
+  { key: 'scared', label: 'Tourists scared', pts: SCORE.scare },
+  { key: 'pond', label: 'Pond plunges', pts: SCORE.pondFall },
+  { key: 'icecream', label: 'Ice creams downed', pts: SCORE.iceCream },
+  { key: 'stampede', label: 'Stamedes triggered', pts: SCORE.stampede },
+  { key: 'selfie', label: 'Selfie sticks wrecked', pts: SCORE.selfie },
+  { key: 'trash', label: 'Trash cans toppled', pts: SCORE.trash },
+  { key: 'platform', label: 'Platforms emptied', pts: SCORE.platform },
+  { key: 'cart', label: 'Carts toppled', pts: SCORE.cart },
+  { key: 'vip', label: 'VIPs terrified', pts: SCORE.vip },
+  { key: 'bowling', label: 'Tourist bowling (2+ chain)', pts: SCORE.bowling },
+  { key: 'strikes', label: 'STRIKES (3+ chain)', pts: SCORE.strike },
+  { key: 'photos', label: 'Photos taken of Munch', pts: SCORE.photo },
+];
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const sceneRef = useRef<GameScene | null>(null);
-  const worldRef = useRef<World | null>(null);
-  const adapterRef = useRef<LocalLoopback | null>(null);
-  const inputRef = useRef<LocalInput | null>(null);
-  const rafRef = useRef(0);
-  const lastTRef = useRef(0);
-  const pausedRef = useRef(false);
-  const screenRef = useRef<Screen>('title');
-  const hudTimerRef = useRef(0);
+  const gameRef = useRef<GameCtl | null>(null);
 
   const [screen, setScreen] = useState<Screen>('title');
-  const [hud, setHud] = useState<HudSnapshot | null>(null);
-  const [paused, setPaused] = useState(false);
-  const [meta, setMeta] = useState<MetaState>(loadMeta);
+  const [meta, setMeta] = useState<MetaState>(() => loadMeta());
   const [popups, setPopups] = useState<Popup[]>([]);
-  const [banner, setBanner] = useState<{ title: string; sub: string } | null>(null);
-  const [endInfo, setEndInfo] = useState<{ result: 'win' | 'caught'; cp: number } | null>(null);
-  const [currentEvent, setCurrentEvent] = useState<EventId | null>(null);
+  const [banner, setBanner] = useState<Banner | null>(null);
+  const [endData, setEndData] = useState<EndData | null>(null);
+  // rare-changing HUD states (bars are updated imperatively)
+  const [stageName, setStageName] = useState('PEACEFUL');
+  const [stageColor, setStageColor] = useState('#7ed957');
+  const [lives, setLives] = useState(3);
+  const [hidden, setHidden] = useState(false);
+  const [eventId, setEventId] = useState<string>('feeding');
+  const [scoreMult, setScoreMult] = useState(1);
 
-  screenRef.current = screen;
-  pausedRef.current = paused;
+  const screenRef = useRef<Screen>('title');
+  const metaRef = useRef(meta);
+  const awardedRef = useRef(false);
+  const bannerQueueRef = useRef<Banner[]>([]);
+  const bannerActiveRef = useRef(false);
+  const bannerIdRef = useRef(1);
+  const popupIdRef = useRef(1);
 
-  // ---- popup helper (3D -> DOM) -------------------------------------------
-  const addPopup = useCallback((x: number, z: number, text: string, cls: string) => {
-    const scene = sceneRef.current;
-    if (!scene) return;
-    const pt = scene.project(x, z);
-    if (!pt.visible) return;
-    const id = ++popupId;
-    setPopups((ps) => [...ps.slice(-14), { id, x: pt.x + (Math.random() - 0.5) * 30, y: pt.y, text, cls }]);
-    window.setTimeout(() => setPopups((ps) => ps.filter((p) => p.id !== id)), 1100);
+  // imperative HUD refs
+  const chaosFillRef = useRef<HTMLDivElement>(null);
+  const chaosNumRef = useRef<HTMLSpanElement>(null);
+  const scoreRef = useRef<HTMLSpanElement>(null);
+  const objectiveRef = useRef<HTMLDivElement>(null);
+  const comboWrapRef = useRef<HTMLDivElement>(null);
+  const comboValRef = useRef<HTMLSpanElement>(null);
+  const comboFillRef = useRef<HTMLDivElement>(null);
+  const staminaFillRef = useRef<HTMLDivElement>(null);
+  const splashHintRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    screenRef.current = screen;
+  }, [screen]);
+  useEffect(() => {
+    metaRef.current = meta;
+  }, [meta]);
+
+  const pumpBanners = useCallback(() => {
+    if (bannerActiveRef.current) return;
+    const next = bannerQueueRef.current.shift();
+    if (!next) return;
+    bannerActiveRef.current = true;
+    setBanner(next);
+    window.setTimeout(() => {
+      bannerActiveRef.current = false;
+      setBanner(null);
+      pumpBanners();
+    }, 2700);
   }, []);
 
-  // ---- boot renderer once --------------------------------------------------
+  const togglePause = useCallback(() => {
+    if (screenRef.current === 'playing') {
+      setScreen('paused');
+      audio.play('ui');
+    } else if (screenRef.current === 'paused') {
+      setScreen('playing');
+      audio.play('ui');
+    }
+  }, []);
+  const pauseFnRef = useRef(togglePause);
+  pauseFnRef.current = togglePause;
+
+  // ===========================================================================
+  // Game boot + main loop (mounted once)
+  // ===========================================================================
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const world = new World();
-    const scene = new GameScene(canvas, addPopup);
+    const scene = new GameScene(canvas);
     const input = new LocalInput();
-    const adapter = new LocalLoopback(input);
-    worldRef.current = world;
-    sceneRef.current = scene;
-    inputRef.current = input;
-    adapterRef.current = adapter;
-    input.onPause = () => {
-      if (screenRef.current === 'game') setPaused((p) => !p);
+    const net = new LocalLoopback(input);
+    const world = new World();
+    world.reset({ upgrades: { ...metaRef.current.upgrades }, event: 'feeding', attract: true });
+    gameRef.current = { scene, input, net, world };
+    input.onPause = () => pauseFnRef.current();
+
+    let lastStage = -1;
+    let lastLives = -1;
+    let lastHidden = false;
+    let lastEvent = '';
+    let lastMult = 1;
+
+    const onPopups = (list: UiPopup[]): void => {
+      const items: Popup[] = list.map((p) => ({ ...p, id: popupIdRef.current++ }));
+      setPopups((prev) => [...prev.slice(-20), ...items]);
+      const ids = new Set(items.map((i) => i.id));
+      window.setTimeout(() => setPopups((prev) => prev.filter((p) => !ids.has(p.id))), 1200);
     };
 
-    // attract mode behind title
-    world.reset({ upgrades: {}, event: 'feeding', attract: true });
-    scene.resetForRun(world);
-
-    lastTRef.current = performance.now();
-    const loop = (t: number) => {
-      rafRef.current = requestAnimationFrame(loop);
-      const dt = Math.min((t - lastTRef.current) / 1000, 0.1);
-      lastTRef.current = t;
-      const w = worldRef.current;
-      const s = sceneRef.current;
-      const a = adapterRef.current;
-      if (!w || !s || !a) return;
-      const isPaused = pausedRef.current;
-      if (!isPaused) {
-        const inputs = a.gatherInputs();
-        w.step(dt, inputs);
-        a.broadcast(w.events);
-      }
-      s.render(w, dt, isPaused);
-
-      // consume world events for UI/audio
-      for (const e of w.events.length ? [] : []) void e; // (events consumed in scene)
-
-      // HUD sync at 12Hz (cheap React updates)
-      hudTimerRef.current -= dt;
-      if (hudTimerRef.current <= 0 && screenRef.current === 'game') {
-        hudTimerRef.current = 1 / 12;
-        const snap = w.snapshot();
-        setHud((prev) => {
-          if (prev && prev.score === snap.score && prev.chaos === snap.chaos && prev.stamina === snap.stamina && prev.combo === snap.combo && prev.lives === snap.lives && prev.over === snap.over && prev.hidden === snap.hidden && prev.stageIndex === snap.stageIndex && prev.nearPond === snap.nearPond) return prev;
-          return snap;
+    const onGameOver = (result: 'win' | 'caught'): void => {
+      window.setTimeout(() => {
+        if (awardedRef.current) return;
+        awardedRef.current = true;
+        const cp = world.chaosPointsEarned();
+        const m: MetaState = { ...metaRef.current, upgrades: { ...metaRef.current.upgrades } };
+        m.chaosPoints += cp;
+        m.runs += 1;
+        if (result === 'win') m.wins += 1;
+        m.bestScore = Math.max(m.bestScore, world.score);
+        saveMeta(m);
+        metaRef.current = m;
+        setMeta(m);
+        setEndData({
+          result, score: world.score, cp, chaos: Math.floor(world.chaos),
+          bestCombo: world.stats.bestCombo, stats: { ...world.stats },
         });
-        audio.setIntensity(snap.stageIndex);
-        if (snap.over && !endInfoRef.current) {
-          const cp = w.chaosPointsEarned();
-          endInfoRef.current = { result: snap.result ?? 'caught', cp };
-          setEndInfo(endInfoRef.current);
-          setMeta((m) => {
-            const next: MetaState = {
-              ...m,
-              chaosPoints: m.chaosPoints + cp,
-              bestScore: Math.max(m.bestScore, snap.score),
-              runs: m.runs + 1,
-              wins: m.wins + (snap.result === 'win' ? 1 : 0),
-            };
-            saveMeta(next);
-            return next;
-          });
-        }
+        setScreen('end');
+      }, result === 'win' ? 1900 : 1400);
+    };
+
+    const onNotice = (n: UiNotice): void => {
+      if (n.type === 'gameover' && n.result) {
+        onGameOver(n.result);
+      } else if (n.type === 'stage') {
+        const idx = n.stageIndex ?? 0;
+        bannerQueueRef.current.push({
+          id: bannerIdRef.current++,
+          title: n.title,
+          sub: idx >= 3 ? 'Security is escalating — stay frosty!' : 'The zoo is getting suspicious…',
+          color: STAGES[idx].color,
+        });
+        pumpBanners();
+      } else {
+        bannerQueueRef.current.push({ id: bannerIdRef.current++, title: n.title, sub: n.sub, color: '#ffd93d' });
+        pumpBanners();
       }
     };
-    rafRef.current = requestAnimationFrame(loop);
+
+    const updateHud = (s: HudSnapshot): void => {
+      if (chaosFillRef.current) {
+        chaosFillRef.current.style.width = `${s.chaos}%`;
+        chaosFillRef.current.style.background = s.stageColor;
+      }
+      if (chaosNumRef.current) chaosNumRef.current.textContent = `${Math.floor(s.chaos)}%`;
+      if (scoreRef.current) scoreRef.current.textContent = String(s.score);
+      if (objectiveRef.current) objectiveRef.current.textContent = s.objective;
+      if (staminaFillRef.current) {
+        const pct = (s.stamina / s.staminaMax) * 100;
+        staminaFillRef.current.style.width = `${pct}%`;
+        staminaFillRef.current.style.backgroundColor = pct > 30 ? '#7ed957' : '#ff6b6b';
+      }
+      if (comboWrapRef.current) {
+        comboWrapRef.current.style.display = s.combo >= 2 ? 'flex' : 'none';
+      }
+      if (s.combo >= 2) {
+        if (comboValRef.current) comboValRef.current.textContent = `x${s.combo}`;
+        if (comboFillRef.current) comboFillRef.current.style.width = `${s.comboT * 100}%`;
+      }
+      if (splashHintRef.current) {
+        splashHintRef.current.style.opacity = s.nearPond && !s.over ? '1' : '0';
+      }
+      if (s.stageIndex !== lastStage) {
+        lastStage = s.stageIndex;
+        setStageName(s.stageName);
+        setStageColor(s.stageColor);
+      }
+      if (s.lives !== lastLives) {
+        lastLives = s.lives;
+        setLives(s.lives);
+      }
+      if (s.hidden !== lastHidden) {
+        lastHidden = s.hidden;
+        setHidden(s.hidden);
+      }
+      if (s.eventId !== lastEvent) {
+        lastEvent = s.eventId;
+        setEventId(s.eventId);
+      }
+      if (s.scoreMult !== lastMult) {
+        lastMult = s.scoreMult;
+        setScoreMult(s.scoreMult);
+      }
+    };
+
+    const onResize = (): void => scene.resize();
+    window.addEventListener('resize', onResize);
+
+    let raf = 0;
+    let last = performance.now();
+    const loop = (now: number): void => {
+      raf = requestAnimationFrame(loop);
+      const dt = Math.min((now - last) / 1000, 0.1);
+      last = now;
+      const paused = screenRef.current === 'paused';
+      if (!paused && !world.over) {
+        world.step(dt, net.gatherInputs());
+      }
+      scene.sync(world, paused ? 0 : dt);
+      const { popups: pp, notices } = scene.consumeEvents(world);
+      if (pp.length) onPopups(pp);
+      for (const n of notices) onNotice(n);
+      updateHud(world.snapshot());
+    };
+    raf = requestAnimationFrame(loop);
+
     return () => {
-      cancelAnimationFrame(rafRef.current);
+      cancelAnimationFrame(raf);
+      window.removeEventListener('resize', onResize);
       input.dispose();
       scene.dispose();
-      audio.stopMusic();
+      gameRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const endInfoRef = useRef<{ result: 'win' | 'caught'; cp: number } | null>(null);
-
-  // ---- run control ----------------------------------------------------------
-  const startRun = useCallback(() => {
-    const w = worldRef.current;
-    const s = sceneRef.current;
-    const metaNow = loadMeta();
-    if (!w || !s) return;
-    const ev = EVENTS[Math.floor(Math.random() * EVENTS.length)];
-    endInfoRef.current = null;
-    setEndInfo(null);
-    setBanner(null);
-    setCurrentEvent(ev.id);
-    w.reset({ upgrades: metaNow.upgrades, event: ev.id, attract: false });
-    s.resetForRun(w);
-    setPaused(false);
-    setScreen('game');
-    setHud(w.snapshot());
+  // ===========================================================================
+  // Actions
+  // ===========================================================================
+  const startRun = (): void => {
+    const g = gameRef.current;
+    if (!g) return;
     audio.ensure();
+    audio.setMuted(metaRef.current.muted);
     audio.startMusic();
     audio.setIntensity(0);
-    audio.play('stageup');
-    setBanner({ title: ev.name, sub: ev.desc });
-    window.setTimeout(() => setBanner(null), 3200);
-  }, []);
+    const ev = EVENTS[Math.floor(Math.random() * EVENTS.length)];
+    g.world.reset({ upgrades: { ...metaRef.current.upgrades }, event: ev.id, attract: false });
+    g.scene.resetDynamic();
+    awardedRef.current = false;
+    setEndData(null);
+    bannerQueueRef.current.push({ id: bannerIdRef.current++, title: ev.name, sub: ev.desc, color: '#ffd93d' });
+    pumpBanners();
+    setScreen('playing');
+    audio.play('ui');
+  };
 
-  const backToTitle = useCallback(() => {
-    const w = worldRef.current;
-    const s = sceneRef.current;
-    if (!w || !s) return;
-    w.reset({ upgrades: {}, event: 'feeding', attract: true });
-    s.resetForRun(w);
+  const toTitle = (): void => {
+    const g = gameRef.current;
+    if (g) {
+      g.world.reset({ upgrades: { ...metaRef.current.upgrades }, event: 'feeding', attract: true });
+      g.scene.resetDynamic();
+    }
+    audio.setIntensity(0);
     setScreen('title');
-    setHud(null);
-    setEndInfo(null);
-    endInfoRef.current = null;
-    audio.stopMusic();
-  }, []);
+    audio.play('ui');
+  };
 
-  // world-level banner events (drone, vip)
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      const w = worldRef.current;
-      if (!w || screenRef.current !== 'game') return;
-      for (const e of w.events) {
-        if (e.kind === 'banner') {
-          setBanner({ title: e.title, sub: e.sub });
-          window.setTimeout(() => setBanner(null), 2600);
-        }
-      }
-    }, 120);
-    return () => clearInterval(id);
-  }, []);
+  const toggleMute = (): void => {
+    audio.ensure();
+    const m = { ...metaRef.current, muted: !metaRef.current.muted };
+    saveMeta(m);
+    setMeta(m);
+    audio.setMuted(m.muted);
+    audio.play('ui');
+  };
 
-  const toggleMute = useCallback(() => {
-    setMeta((m) => {
-      const next = { ...m, muted: !m.muted };
-      saveMeta(next);
-      audio.setMuted(next.muted);
-      return next;
-    });
-  }, []);
+  const buy = (id: string): void => {
+    audio.ensure();
+    const next = tryPurchase(metaRef.current, id);
+    if (next !== metaRef.current) {
+      setMeta(next);
+      audio.play('buy');
+    } else {
+      audio.play('denied');
+    }
+  };
 
-  // first-gesture audio unlock
-  useEffect(() => {
-    const unlock = () => audio.ensure();
-    window.addEventListener('pointerdown', unlock, { once: true });
-    window.addEventListener('keydown', unlock, { once: true });
-    return () => {
-      window.removeEventListener('pointerdown', unlock);
-      window.removeEventListener('keydown', unlock);
-    };
-  }, []);
+  const eventDef = EVENTS.find((e) => e.id === eventId);
+  const EventIcon = eventDef ? ICONS[eventDef.icon] : Apple;
 
-  const EvIcon = currentEvent ? EVENT_ICONS[currentEvent] : null;
-  const evDef = currentEvent ? EVENTS.find((e) => e.id === currentEvent) : null;
-
-  // ==========================================================================
+  // ===========================================================================
+  // Render
+  // ===========================================================================
   return (
-    <div className="fixed inset-0 overflow-hidden bg-[#0d1b12] font-game select-none">
-      <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
+    <div className="relative h-full w-full overflow-hidden">
+      <canvas
+        ref={canvasRef}
+        style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', display: 'block', zIndex: 1 }}
+      />
 
-      {/* score popups (world-anchored) */}
-      {screen === 'game' &&
-        popups.map((p) => (
-          <div key={p.id} className={`popup popup-${p.cls}`} style={{ left: p.x, top: p.y }}>
+      {/* world-space score popups */}
+      <div className="pointer-events-none fixed inset-0 z-40">
+        {popups.map((p) => (
+          <div key={p.id} className={`popup ${p.cls}`} style={{ left: p.sx, top: p.sy }}>
             {p.text}
           </div>
         ))}
+      </div>
 
-      {/* ======================= TITLE ======================= */}
-      {screen === 'title' && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-b from-black/55 via-black/25 to-black/60">
-          <div className="animate-bounce-slow mb-2 text-7xl drop-shadow-[0_6px_0_rgba(0,0,0,0.45)]">🦫</div>
-          <h1 className="title-logo">
-            CAPYBARA
-            <span className="title-logo-accent">CHAOS</span>
-          </h1>
-          <p className="mt-1 text-lg font-bold tracking-[0.35em] text-amber-200/90 drop-shadow">ZOO SHUTDOWN</p>
-          <p className="mt-3 max-w-md px-4 text-center text-sm font-semibold text-white/80">
-            You are Munch — the grumpiest capybara alive. Cause enough chaos and the zoo SHUTS DOWN for the day.
-          </p>
-          <div className="mt-8 flex flex-col items-center gap-3">
-            <button className="btn-primary" onClick={startRun}>
-              <Play className="h-6 w-6" fill="currentColor" /> START RUN
-            </button>
-            <div className="flex gap-3">
-              <button className="btn-secondary" onClick={() => setScreen('shop')}>
-                <ShoppingBag className="h-5 w-5" /> UPGRADES
-              </button>
-              <button className="btn-secondary" onClick={() => setScreen('howto')}>
-                <HelpCircle className="h-5 w-5" /> HOW TO PLAY
-              </button>
+      {/* ======================= HUD ======================= */}
+      {(screen === 'playing' || screen === 'paused') && (
+        <div className="pointer-events-none fixed inset-0 z-30">
+          {/* chaos meter */}
+          <div className="absolute left-1/2 top-3 w-[min(560px,72vw)] -translate-x-1/2">
+            <div className="mb-1 flex items-end justify-between px-1">
+              <span className="text-sm font-extrabold tracking-widest text-white drop-shadow-md" style={{ color: stageColor }}>
+                {stageName}
+              </span>
+              <span ref={chaosNumRef} className="text-lg font-extrabold text-white drop-shadow-md">0%</span>
+            </div>
+            <div className={`relative h-5 overflow-hidden rounded-full border-2 border-white/60 bg-black/50 ${lastChaosDanger(stageName) ? 'chaos-danger' : ''}`}>
+              <div ref={chaosFillRef} className="h-full rounded-full transition-[width] duration-150" style={{ width: '0%', background: stageColor }} />
+              {[20, 40, 60, 75, 90].map((t) => (
+                <div key={t} className="absolute top-0 h-full w-0.5 bg-white/50" style={{ left: `${t}%` }} />
+              ))}
+            </div>
+            <div ref={objectiveRef} className="mt-1 text-center text-sm font-bold text-white/90 drop-shadow-md" />
+          </div>
+
+          {/* score + combo */}
+          <div className="absolute right-4 top-3 flex flex-col items-end gap-1">
+            <div className="hud-chip flex items-center gap-2 text-2xl font-extrabold">
+              <Trophy size={22} className="text-yellow-300" />
+              <span ref={scoreRef}>0</span>
+              {scoreMult > 1 && <span className="rounded-lg bg-red-500 px-1.5 py-0.5 text-xs font-extrabold">TV x1.5</span>}
+            </div>
+            <div ref={comboWrapRef} className="hud-chip hidden items-center gap-2" style={{ display: 'none' }}>
+              <span className="combo-flame inline-block">
+                <Flame size={22} className="text-orange-400" fill="#fb5607" />
+              </span>
+              <span ref={comboValRef} className="text-xl font-extrabold text-orange-300">x2</span>
+              <div className="h-2 w-20 overflow-hidden rounded-full bg-black/60">
+                <div ref={comboFillRef} className="h-full bg-orange-400" style={{ width: '100%' }} />
+              </div>
             </div>
           </div>
-          <div className="mt-6 flex items-center gap-4 text-sm font-bold text-amber-100/80">
-            <span className="flex items-center gap-1.5"><Trophy className="h-4 w-4" /> Best: {meta.bestScore}</span>
-            <span>🌀 Chaos Points: {meta.chaosPoints}</span>
+
+          {/* lives + event + status */}
+          <div className="absolute left-4 top-3 flex flex-col gap-2">
+            <div className="hud-chip flex items-center gap-1.5">
+              {[0, 1, 2].map((i) => (
+                <PawPrint key={i} size={24} className={i < lives ? 'text-amber-300' : 'text-white/25'} fill={i < lives ? '#fbbf24' : 'none'} />
+              ))}
+            </div>
+            {eventDef && (
+              <div className="hud-chip flex items-center gap-2 text-xs font-bold">
+                <EventIcon size={16} className="text-yellow-300" />
+                {eventDef.name}
+              </div>
+            )}
+            {hidden && (
+              <div className="hud-chip flex items-center gap-2 bg-green-900/70 text-sm font-extrabold text-green-200">
+                <EyeOff size={16} /> HIDDEN
+              </div>
+            )}
           </div>
-          <button className="absolute right-4 top-4 rounded-full bg-black/40 p-2.5 text-white hover:bg-black/60" onClick={toggleMute}>
-            {meta.muted ? <VolumeX className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />}
-          </button>
+
+          {/* stamina */}
+          <div className="absolute bottom-5 left-1/2 w-[min(380px,60vw)] -translate-x-1/2">
+            <div className="mb-1 text-center text-xs font-extrabold tracking-widest text-white/85 drop-shadow">STAMINA — HOLD SHIFT TO CHARGE</div>
+            <div className="h-4 overflow-hidden rounded-full border-2 border-white/60 bg-black/50">
+              <div ref={staminaFillRef} className="h-full rounded-full" style={{ width: '100%', backgroundColor: '#7ed957' }} />
+            </div>
+          </div>
+
+          {/* controls hint */}
+          <div className="hud-chip absolute bottom-4 left-4 text-[11px] font-bold leading-5 text-white/80">
+            WASD move · J bite · K headbutt<br />
+            SHIFT charge · L hide/roll · SPACE splash
+          </div>
+          <div ref={splashHintRef} className="hud-chip absolute bottom-4 right-4 text-sm font-extrabold text-cyan-200 transition-opacity" style={{ opacity: 0 }}>
+            SPACE — SPLASH ATTACK!
+          </div>
         </div>
       )}
 
-      {/* ======================= HOW TO PLAY ======================= */}
-      {screen === 'howto' && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/60 p-4">
-          <div className="panel max-w-lg">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-2xl font-extrabold text-amber-900">HOW TO PLAY</h2>
-              <button className="rounded-full p-1.5 hover:bg-amber-100" onClick={() => setScreen('title')}><X className="h-6 w-6 text-amber-900" /></button>
-            </div>
-            <div className="space-y-2.5 text-sm font-semibold text-amber-950/90">
-              <p>🎯 <b>Goal:</b> fill the CHAOS meter to 100% to shut the zoo down. Get grabbed 3 times and you're caught!</p>
-              <p>⌨️ <b>WASD / Arrows</b> — waddle around</p>
-              <p>🦷 <b>J or Z</b> — Bite (quick scare, wrecks selfie sticks)</p>
-              <p>💥 <b>K or X</b> — Headbutt (big knockback — shove them into the pond!)</p>
-              <p>💨 <b>Shift (hold)</b> — Charge! Bowls through crowds, drains stamina</p>
-              <p>🌿 <b>L or C</b> — Hide in bushes / roll in the mud (mud = speed boost)</p>
-              <p>💦 <b>Space</b> — Splash attack (near the pond)</p>
-              <p>🍔 Eat food tourists toss to restore stamina. Combos multiply your score!</p>
-              <p>🚨 More chaos = more security: keepers, tranq darts, drones… ZOO SWAT.</p>
-            </div>
-            <button className="btn-primary mt-5 w-full" onClick={startRun}>
-              <Play className="h-5 w-5" fill="currentColor" /> GOT IT — START RUN
+      {/* event / stage banner */}
+      {banner && (screen === 'playing' || screen === 'paused') && (
+        <div className="pointer-events-none fixed inset-x-0 top-[18%] z-40 flex justify-center">
+          <div key={banner.id} className={`${banner.color === '#ffd93d' ? 'banner-card' : 'stage-banner'} rounded-3xl border-4 px-10 py-4 text-center shadow-2xl`}
+            style={{ borderColor: banner.color, background: 'rgba(20,20,20,0.82)' }}>
+            <div className="text-3xl font-extrabold tracking-wide" style={{ color: banner.color }}>{banner.title}</div>
+            <div className="mt-1 text-sm font-bold text-white/90">{banner.sub}</div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================= TITLE ======================= */}
+      {screen === 'title' && (
+        <div className="fixed inset-0 z-30 flex flex-col items-center justify-center bg-gradient-to-b from-black/35 via-transparent to-black/55">
+          <div className="logo-wobble mb-2 text-center">
+            <div className="game-title text-6xl font-extrabold text-amber-300 md:text-7xl">CAPYBARA CHAOS</div>
+            <div className="game-title mt-1 text-3xl font-extrabold text-lime-300 md:text-4xl">— ZOO SHUTDOWN —</div>
+          </div>
+          <div className="mb-8 rounded-full bg-black/45 px-5 py-1.5 text-sm font-bold text-white/90">
+            Munch the capybara has had ENOUGH. Cause chaos. Shut it down.
+          </div>
+          <div className="flex flex-col items-center gap-3">
+            <button className="btn-chunky w-72 border-green-700 bg-green-500 text-2xl" onClick={startRun}>
+              <span className="inline-flex items-center gap-2"><Play size={24} /> START RUN</span>
             </button>
+            <button className="btn-chunky w-72 border-amber-700 bg-amber-500" onClick={() => { audio.ensure(); audio.play('ui'); setScreen('shop'); }}>
+              <span className="inline-flex items-center gap-2"><ShoppingBag size={22} /> UPGRADES</span>
+            </button>
+            <button className="btn-chunky w-72 border-sky-700 bg-sky-500" onClick={() => { audio.ensure(); audio.play('ui'); setScreen('howto'); }}>
+              <span className="inline-flex items-center gap-2"><HelpCircle size={22} /> HOW TO PLAY</span>
+            </button>
+          </div>
+          <div className="mt-8 flex items-center gap-6 text-sm font-bold text-white/80">
+            <span className="inline-flex items-center gap-1.5"><Trophy size={16} className="text-yellow-300" /> Best: {meta.bestScore}</span>
+            <span className="inline-flex items-center gap-1.5"><Zap size={16} className="text-amber-300" /> Chaos Points: {meta.chaosPoints}</span>
+            <span>Runs: {meta.runs} · Wins: {meta.wins}</span>
           </div>
         </div>
       )}
 
       {/* ======================= SHOP ======================= */}
       {screen === 'shop' && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/60 p-4">
-          <div className="panel max-h-[88vh] w-full max-w-xl overflow-y-auto">
-            <div className="mb-1 flex items-center justify-between">
-              <h2 className="text-2xl font-extrabold text-amber-900">CHAOS UPGRADES</h2>
-              <button className="rounded-full p-1.5 hover:bg-amber-100" onClick={() => setScreen('title')}><X className="h-6 w-6 text-amber-900" /></button>
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50 p-4">
+          <div className="card-3d max-h-[92vh] w-[min(880px,94vw)] overflow-y-auto p-6">
+            <div className="mb-4 flex items-center justify-between">
+              <div className="text-3xl font-extrabold text-amber-300">CHAOS SHOP</div>
+              <div className="hud-chip flex items-center gap-2 text-xl font-extrabold">
+                <Zap size={20} className="text-amber-300" /> {meta.chaosPoints} CP
+              </div>
             </div>
-            <p className="mb-4 text-sm font-bold text-amber-700">🌀 Chaos Points: <span className="text-lg">{meta.chaosPoints}</span></p>
-            <div className="grid gap-2.5">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               {UPGRADES.map((u) => {
                 const owned = meta.upgrades[u.id] ?? 0;
-                const maxed = owned >= u.tiers.length;
-                const cost = maxed ? null : u.tiers[owned];
-                const afford = cost !== null && meta.chaosPoints >= cost;
-                const Icon = UPGRADE_ICONS[u.icon] ?? Zap;
+                const cost = upgradeCost(u.id, owned);
+                const Icon = ICONS[u.icon] ?? Zap;
+                const affordable = cost !== null && meta.chaosPoints >= cost;
                 return (
-                  <div key={u.id} className="flex items-center gap-3 rounded-xl bg-amber-50 p-3 shadow-sm">
-                    <div className="rounded-lg bg-amber-200 p-2"><Icon className="h-5 w-5 text-amber-800" /></div>
+                  <div key={u.id} className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 p-3">
+                    <div className="rounded-xl bg-black/40 p-2.5">
+                      <Icon size={26} className="text-lime-300" />
+                    </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
-                        <span className="font-extrabold text-amber-950">{u.name}</span>
+                        <span className="truncate text-base font-extrabold text-white">{u.name}</span>
                         <span className="flex gap-0.5">
                           {u.tiers.map((_, i) => (
-                            <span key={i} className={`h-2 w-4 rounded-full ${i < owned ? 'bg-green-500' : 'bg-amber-200'}`} />
+                            <span key={i} className={`inline-block h-2 w-4 rounded-full ${i < owned ? 'bg-lime-400' : 'bg-white/20'}`} />
                           ))}
                         </span>
                       </div>
-                      <p className="truncate text-xs font-semibold text-amber-800/80">{u.desc}</p>
+                      <div className="text-xs font-semibold text-white/70">{u.desc}</div>
                     </div>
                     <button
-                      disabled={maxed || !afford}
-                      className={`shrink-0 rounded-lg px-3 py-1.5 text-sm font-extrabold shadow ${
-                        maxed ? 'bg-gray-300 text-gray-500' : afford ? 'bg-green-500 text-white hover:bg-green-600' : 'bg-amber-200 text-amber-500'
+                      className={`rounded-xl border-b-4 px-3 py-2 text-sm font-extrabold text-white transition active:translate-y-0.5 ${
+                        cost === null
+                          ? 'cursor-default border-gray-600 bg-gray-500'
+                          : affordable
+                            ? 'border-green-700 bg-green-500 hover:scale-105'
+                            : 'border-red-800 bg-red-500/70'
                       }`}
-                      onClick={() => {
-                        const next = tryPurchase(meta, u.id);
-                        if (next !== meta) {
-                          setMeta(next);
-                          audio.ensure();
-                          audio.play('buy');
-                        } else {
-                          audio.play('denied');
-                        }
-                      }}
+                      onClick={() => cost !== null && buy(u.id)}
                     >
-                      {maxed ? 'MAX' : `🌀${cost}`}
+                      {cost === null ? 'MAX' : `${cost} CP`}
                     </button>
                   </div>
                 );
               })}
             </div>
-            <button className="btn-primary mt-5 w-full" onClick={startRun}>
-              <Play className="h-5 w-5" fill="currentColor" /> START RUN
+            <div className="mt-5 flex justify-center">
+              <button className="btn-chunky border-sky-700 bg-sky-500" onClick={() => { setScreen(endData ? 'end' : 'title'); audio.play('ui'); }}>
+                BACK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================= HOW TO PLAY ======================= */}
+      {screen === 'howto' && (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50 p-4">
+          <div className="card-3d max-h-[92vh] w-[min(760px,94vw)] overflow-y-auto p-6 text-white">
+            <div className="mb-3 text-3xl font-extrabold text-amber-300">HOW TO PLAY</div>
+            <div className="mb-4 text-sm font-semibold text-white/80">
+              You are <b className="text-amber-300">Munch</b>, a grumpy capybara. Fill the CHAOS METER to 100% to shut the zoo down and win.
+              Get grabbed 3 times by keepers and you're caught. Between runs, spend Chaos Points on permanent upgrades.
+            </div>
+            <div className="mb-4 grid grid-cols-2 gap-2 text-sm font-bold">
+              {[
+                ['WASD / Arrows', 'Waddle around'],
+                ['J or Z', 'Bite — quick scare'],
+                ['K or X', 'Headbutt — big knockback (into the pond!)'],
+                ['SHIFT (hold)', 'Charge — bowl through crowds'],
+                ['L or C', 'Hide in bushes / roll in mud (speed boost)'],
+                ['SPACE', 'Splash (near pond) — AoE scare + soak'],
+                ['ESC / P', 'Pause'],
+              ].map(([k, v]) => (
+                <div key={k} className="flex items-center gap-2 rounded-xl bg-white/5 px-3 py-2">
+                  <span className="rounded-lg bg-black/50 px-2 py-0.5 text-xs font-extrabold text-lime-300">{k}</span>
+                  <span className="text-xs text-white/85">{v}</span>
+                </div>
+              ))}
+            </div>
+            <div className="mb-2 text-lg font-extrabold text-lime-300">SCORING</div>
+            <div className="mb-4 grid grid-cols-2 gap-x-6 gap-y-1 text-xs font-semibold text-white/85">
+              <span>Scare a tourist <b className="float-right text-amber-300">+{SCORE.scare}</b></span>
+              <span>Pond plunge <b className="float-right text-amber-300">+{SCORE.pondFall}</b></span>
+              <span>Ice cream dropped <b className="float-right text-amber-300">+{SCORE.iceCream}</b></span>
+              <span>Stampede (4+ fleeing) <b className="float-right text-amber-300">+{SCORE.stampede}</b></span>
+              <span>Selfie stick wrecked <b className="float-right text-amber-300">+{SCORE.selfie}</b></span>
+              <span>Trash can toppled <b className="float-right text-amber-300">+{SCORE.trash}</b></span>
+              <span>Platform emptied <b className="float-right text-amber-300">+{SCORE.platform}</b></span>
+              <span>Chain actions within 4s <b className="float-right text-orange-300">COMBO x2, x3…</b></span>
+            </div>
+            <div className="mb-2 text-lg font-extrabold text-red-300">ESCALATION</div>
+            <div className="mb-4 space-y-1 text-xs font-semibold text-white/85">
+              {STAGES.map((s) => (
+                <div key={s.name} className="flex items-center gap-2">
+                  <span className="inline-block h-3 w-3 rounded-full" style={{ background: s.color }} />
+                  <b style={{ color: s.color }}>{s.at}% {s.name}</b>
+                  <span className="text-white/60">
+                    {s.name === 'PEACEFUL' && '— tourists wander, feed ducks, take selfies'}
+                    {s.name === 'SUSPICIOUS' && '— a keeper starts patrolling'}
+                    {s.name === 'ALARMED' && '— 2 keepers, faster'}
+                    {s.name === 'CODE BROWN' && '— sprinting keepers with tranq darts!'}
+                    {s.name === 'FULL ALERT' && '— drone spotlight hunts you'}
+                    {s.name === 'ZOO SWAT' && '— elite response. Finish it!'}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-center">
+              <button className="btn-chunky border-sky-700 bg-sky-500" onClick={() => { setScreen('title'); audio.play('ui'); }}>
+                GOT IT!
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================= PAUSE ======================= */}
+      {screen === 'paused' && (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/55">
+          <div className="card-3d flex w-[min(420px,90vw)] flex-col items-center gap-3 p-8">
+            <div className="mb-2 flex items-center gap-2 text-4xl font-extrabold text-white">
+              <Pause size={34} className="text-amber-300" /> PAUSED
+            </div>
+            <button className="btn-chunky w-64 border-green-700 bg-green-500" onClick={togglePause}>
+              <span className="inline-flex items-center gap-2"><Play size={20} /> RESUME</span>
+            </button>
+            <button className="btn-chunky w-64 border-amber-700 bg-amber-500" onClick={startRun}>
+              <span className="inline-flex items-center gap-2"><RotateCcw size={20} /> RESTART RUN</span>
+            </button>
+            <button className="btn-chunky w-64 border-rose-800 bg-rose-500" onClick={toTitle}>
+              <span className="inline-flex items-center gap-2"><Home size={20} /> QUIT TO MENU</span>
             </button>
           </div>
         </div>
       )}
 
-      {/* ======================= HUD ======================= */}
-      {screen === 'game' && hud && !endInfo && (
-        <>
-          {/* chaos meter */}
-          <div className="absolute left-1/2 top-3 w-[min(520px,86vw)] -translate-x-1/2">
-            <div className="mb-1 flex items-end justify-between px-1">
-              <span className="rounded-md px-2 py-0.5 text-xs font-extrabold tracking-widest text-white shadow" style={{ background: hud.stageColor }}>
-                {hud.stageName}
-              </span>
-              <span className="text-xs font-extrabold text-white drop-shadow">{hud.objective}</span>
-            </div>
-            <div className="h-5 overflow-hidden rounded-full border-2 border-white/70 bg-black/45 shadow-lg">
-              <div
-                className="h-full rounded-full transition-[width] duration-300"
-                style={{ width: `${hud.chaos}%`, background: `linear-gradient(90deg,#7ed957,${hud.stageColor})` }}
-              />
-            </div>
-            {/* stage ticks */}
-            <div className="relative mt-0.5 h-2">
-              {STAGES.slice(1).map((s) => (
-                <span key={s.at} className="absolute h-2 w-0.5 bg-white/60" style={{ left: `${s.at}%` }} />
-              ))}
-            </div>
-          </div>
-
-          {/* score + combo */}
-          <div className="absolute right-4 top-3 text-right">
-            <div className="text-3xl font-extrabold text-white drop-shadow-[0_2px_0_rgba(0,0,0,0.5)]">
-              {hud.score.toLocaleString()}
-              {hud.scoreMult > 1 && <span className="ml-1 text-sm text-yellow-300">x{hud.scoreMult} TV</span>}
-            </div>
-            {hud.combo > 1 && (
-              <div className="mt-0.5 flex items-center justify-end gap-1 text-orange-300">
-                <Flame className="h-5 w-5" fill="currentColor" />
-                <span className="text-xl font-extrabold drop-shadow">COMBO x{hud.combo}</span>
-                <span className="ml-1 h-1.5 w-14 overflow-hidden rounded bg-black/40">
-                  <span className="block h-full bg-orange-400" style={{ width: `${hud.comboT * 100}%` }} />
-                </span>
-              </div>
-            )}
-          </div>
-
-          {/* event chip */}
-          {evDef && EvIcon && (
-            <div className="absolute left-4 top-3 flex items-center gap-1.5 rounded-full bg-black/45 px-3 py-1.5 text-xs font-extrabold text-amber-200 shadow">
-              <EvIcon className="h-4 w-4" /> {evDef.name}
-            </div>
-          )}
-
-          {/* bottom-left: stamina + lives */}
-          <div className="absolute bottom-4 left-4 space-y-2">
-            <div className="flex gap-1.5">
-              {Array.from({ length: 3 }).map((_, i) => (
-                <PawPrint key={i} className={`h-7 w-7 drop-shadow ${i < hud.lives ? 'text-amber-400' : 'text-white/25'}`} fill="currentColor" />
-              ))}
-            </div>
-            <div className="w-44">
-              <div className="mb-0.5 text-[10px] font-extrabold tracking-widest text-white/80">STAMINA</div>
-              <div className="h-3.5 overflow-hidden rounded-full border border-white/60 bg-black/45">
-                <div
-                  className={`h-full rounded-full transition-[width] duration-150 ${hud.stamina < 25 ? 'bg-red-400' : 'bg-emerald-400'}`}
-                  style={{ width: `${(hud.stamina / hud.staminaMax) * 100}%` }}
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* status badges */}
-          <div className="absolute bottom-4 left-1/2 flex -translate-x-1/2 gap-2">
-            {hud.hidden && <span className="rounded-full bg-green-700/90 px-3 py-1 text-xs font-extrabold text-white shadow">🌿 HIDDEN</span>}
-            {hud.charging && <span className="rounded-full bg-orange-600/90 px-3 py-1 text-xs font-extrabold text-white shadow">💨 CHARGING</span>}
-            {hud.nearPond && <span className="rounded-full bg-cyan-600/90 px-3 py-1 text-xs font-extrabold text-white shadow">SPACE = SPLASH!</span>}
-          </div>
-
-          {/* controls hint (bottom right) */}
-          <div className="absolute bottom-4 right-4 hidden text-right text-[11px] font-bold leading-5 text-white/70 md:block">
-            WASD move · J bite · K headbutt<br />Shift charge · L hide/mud · Space splash
-          </div>
-
-          {/* event banner */}
-          {banner && (
-            <div className="pointer-events-none absolute left-1/2 top-[22%] -translate-x-1/2 text-center">
-              <div className="banner-title">{banner.title}</div>
-              <div className="banner-sub">{banner.sub}</div>
-            </div>
-          )}
-
-          {/* pause button */}
-          <button
-            className="absolute right-4 top-16 rounded-full bg-black/40 p-2.5 text-white hover:bg-black/60"
-            onClick={() => setPaused(true)}
-          >
-            <Pause className="h-5 w-5" />
-          </button>
-          <button className="absolute right-4 top-[6.5rem] rounded-full bg-black/40 p-2.5 text-white hover:bg-black/60" onClick={toggleMute}>
-            {meta.muted ? <VolumeX className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />}
-          </button>
-        </>
-      )}
-
-      {/* ======================= PAUSE ======================= */}
-      {screen === 'game' && paused && !endInfo && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/60">
-          <div className="panel w-72 text-center">
-            <h2 className="mb-4 text-2xl font-extrabold text-amber-900">PAUSED</h2>
-            <div className="flex flex-col gap-2.5">
-              <button className="btn-primary w-full" onClick={() => setPaused(false)}>
-                <Play className="h-5 w-5" fill="currentColor" /> RESUME
-              </button>
-              <button className="btn-secondary w-full" onClick={startRun}>
-                <RotateCcw className="h-5 w-5" /> RESTART RUN
-              </button>
-              <button className="btn-secondary w-full" onClick={backToTitle}>
-                <X className="h-5 w-5" /> QUIT TO TITLE
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ======================= END SCREEN ======================= */}
-      {screen === 'game' && endInfo && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/65 p-4">
-          <div className="panel w-full max-w-md text-center">
-            {endInfo.result === 'win' ? (
+      {/* ======================= RUN END ======================= */}
+      {screen === 'end' && endData && (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/45 p-4">
+          <div className="card-3d max-h-[92vh] w-[min(620px,94vw)] overflow-y-auto p-6 text-center">
+            {endData.result === 'win' ? (
               <>
-                <div className="mb-1 text-5xl">🎉</div>
-                <h2 className="text-3xl font-extrabold text-green-600">ZOO SHUT DOWN!</h2>
-                <p className="mt-1 text-sm font-bold text-amber-800">The zoo is CLOSED for the day. Munch wins.</p>
+                <div className="game-title text-5xl font-extrabold text-lime-300">ZOO SHUT DOWN!</div>
+                <div className="mt-1 text-lg font-bold text-white/85">The zoo closes for the day. Munch wins. GLORIOUS.</div>
               </>
             ) : (
               <>
-                <div className="mb-1 text-5xl">🚔</div>
-                <h2 className="text-3xl font-extrabold text-red-500">CAUGHT!</h2>
-                <p className="mt-1 text-sm font-bold text-amber-800">Munch has been relocated to a calmer enclosure…</p>
+                <div className="game-title text-5xl font-extrabold text-red-400">CAUGHT!</div>
+                <div className="mt-1 text-lg font-bold text-white/85">Munch was gently escorted back to his habitat…</div>
               </>
             )}
-            {hud && (
-              <div className="mt-4 grid grid-cols-2 gap-2 text-left text-sm font-bold text-amber-950">
-                <div className="stat">Score<span>{hud.score.toLocaleString()}</span></div>
-                <div className="stat">Chaos<span>{Math.floor(hud.chaos)}%</span></div>
-                <div className="stat">Best combo<span>x{Math.max(1, worldRef.current?.stats.bestCombo ?? 1)}</span></div>
-                <div className="stat">Tourists scared<span>{worldRef.current?.stats.scared ?? 0}</span></div>
-                <div className="stat">Pond plunges<span>{worldRef.current?.stats.pond ?? 0}</span></div>
-                <div className="stat">Stamedes<span>{worldRef.current?.stats.stampede ?? 0}</span></div>
-              </div>
-            )}
-            <div className="mt-4 rounded-xl bg-amber-100 py-2 text-lg font-extrabold text-amber-800">
-              +🌀 {endInfo.cp} Chaos Points
+            <div className="mx-auto mt-4 grid max-w-md grid-cols-2 gap-x-8 gap-y-1 text-left text-sm font-semibold text-white/85">
+              {BREAKDOWN.filter((b) => endData.stats[b.key] > 0).map((b) => (
+                <div key={b.key} className="flex justify-between gap-2">
+                  <span>{b.label}</span>
+                  <b className="text-amber-300">{endData.stats[b.key]} × {b.pts}</b>
+                </div>
+              ))}
+              <div className="flex justify-between gap-2"><span>Best combo</span><b className="text-orange-300">x{endData.bestCombo}</b></div>
+              <div className="flex justify-between gap-2"><span>Chaos reached</span><b className="text-red-300">{endData.chaos}%</b></div>
             </div>
-            <div className="mt-4 flex flex-col gap-2.5">
-              <button className="btn-primary w-full" onClick={() => setScreen('shop')}>
-                <ShoppingBag className="h-5 w-5" /> SPEND POINTS
+            <div className="mx-auto mt-4 flex max-w-md items-center justify-between rounded-2xl bg-black/40 px-5 py-3">
+              <span className="text-lg font-extrabold text-white">SCORE</span>
+              <span className="text-3xl font-extrabold text-amber-300">{endData.score}</span>
+            </div>
+            <div className="mx-auto mt-2 flex max-w-md items-center justify-between rounded-2xl bg-black/40 px-5 py-2.5">
+              <span className="text-sm font-extrabold text-white">CHAOS POINTS EARNED</span>
+              <span className="inline-flex items-center gap-1.5 text-2xl font-extrabold text-lime-300"><Zap size={20} /> +{endData.cp}</span>
+            </div>
+            <div className="mt-5 flex flex-wrap justify-center gap-3">
+              <button className="btn-chunky border-green-700 bg-green-500" onClick={startRun}>
+                <span className="inline-flex items-center gap-2"><RotateCcw size={20} /> RUN IT BACK</span>
               </button>
-              <button className="btn-primary w-full" onClick={startRun}>
-                <RotateCcw className="h-5 w-5" /> NEXT RUN
+              <button className="btn-chunky border-amber-700 bg-amber-500" onClick={() => { setScreen('shop'); audio.play('ui'); }}>
+                <span className="inline-flex items-center gap-2"><ShoppingBag size={20} /> SHOP</span>
               </button>
-              <button className="btn-secondary w-full" onClick={backToTitle}>
-                <X className="h-5 w-5" /> TITLE
+              <button className="btn-chunky border-sky-700 bg-sky-500" onClick={toTitle}>
+                <span className="inline-flex items-center gap-2"><Home size={20} /> MENU</span>
               </button>
             </div>
           </div>
         </div>
       )}
+
+      {/* global mute + pause buttons */}
+      <div className="fixed right-3 top-1/2 z-50 flex -translate-y-1/2 flex-col gap-2">
+        <button
+          className="rounded-full border-2 border-white/30 bg-black/50 p-2.5 text-white shadow-lg transition hover:scale-110"
+          onClick={toggleMute}
+          title={meta.muted ? 'Unmute' : 'Mute'}
+        >
+          {meta.muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
+        </button>
+        {(screen === 'playing' || screen === 'paused') && (
+          <button
+            className="rounded-full border-2 border-white/30 bg-black/50 p-2.5 text-white shadow-lg transition hover:scale-110"
+            onClick={togglePause}
+            title="Pause (Esc)"
+          >
+            {screen === 'paused' ? <Play size={20} /> : <Pause size={20} />}
+          </button>
+        )}
+      </div>
     </div>
   );
+}
+
+function lastChaosDanger(stageName: string): boolean {
+  return stageName === 'CODE BROWN' || stageName === 'FULL ALERT' || stageName === 'ZOO SWAT';
 }
