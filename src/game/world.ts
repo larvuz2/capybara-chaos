@@ -7,7 +7,7 @@
 
 import {
   ARENA, POND, MUD, PLATFORM, GATES, HIDING_SPOTS, TRASH_CANS, CART_SPOT,
-  PLAYER, TOURIST, KEEPER, STAGES, CHAOS, SCORE, COMBO, ECONOMY,
+  PLAYER, TOURIST, KEEPER, STAGES, CHAOS, SCORE, COMBO, ECONOMY, TUMBLE, PHOTO, FLEE,
 } from './constants';
 import type {
   PlayerState, TouristState, KeeperState, DartState, FoodState, TrashCanState,
@@ -63,6 +63,10 @@ export class World {
   private gapOpen = false; // south fence gap (event or broken)
   private fenceBroken = false;
   private chargeHitT = 0;
+  lastAttackTime = -999; // world time of last player attack (photogs need calm)
+  private chainSeq = 0; // bowling-chain id source (one attack = one chain)
+  private chargeChainId = 0; // chain id shared by all hits of one charge
+  private chains = new Map<number, { n: number; t: number }>(); // chainId -> tumble count
 
   // ---- derived upgrade values -------------------------------------------
   private up(id: string): number {
@@ -128,7 +132,11 @@ export class World {
     this.gapOpen = config.event === 'gateopen';
     this.fenceBroken = false;
     this.chargeHitT = 0;
-    this.stats = { scared: 0, pond: 0, icecream: 0, stampede: 0, selfie: 0, trash: 0, platform: 0, cart: 0, vip: 0, bestCombo: 0 };
+    this.lastAttackTime = -999;
+    this.chainSeq = 0;
+    this.chargeChainId = 0;
+    this.chains.clear();
+    this.stats = { scared: 0, pond: 0, icecream: 0, stampede: 0, selfie: 0, trash: 0, platform: 0, cart: 0, vip: 0, bowling: 0, strikes: 0, photos: 0, bestCombo: 0 };
     this.drone = { active: false, angle: 0, x: 0, z: 0, spotX: 0, spotZ: 0 };
 
     this.player = {
@@ -185,6 +193,10 @@ export class World {
     }
     this.stampedeCd = Math.max(0, this.stampedeCd - dt);
     this.chargeHitT = Math.max(0, this.chargeHitT - dt);
+    // retire stale bowling chains
+    for (const [id, c] of this.chains) {
+      if (this.time - c.t > 5) this.chains.delete(id);
+    }
 
     // platform emptied check
     if (!this.platformAwarded) {
@@ -236,6 +248,7 @@ export class World {
     const wantCharge = input.charge && moving && p.stamina > 1;
     if (wantCharge && !p.charging) {
       p.charging = true;
+      this.chargeChainId = ++this.chainSeq; // one charge = one bowling chain
       this.emit({ kind: 'sfx', name: 'charge' });
       this.emit({ kind: 'particles', preset: 'dash', x: p.x, z: p.z });
     }
@@ -296,18 +309,17 @@ export class World {
     if (input.hide) this.doHideRoll();
     if (input.splash && p.splashCd <= 0) this.doSplash();
 
-    // charge collisions: bowl through tourists
+    // charge collisions: bowl through tourists → low fast tumble
     if (p.charging && speedNow > 7) {
       for (const t of this.tourists.values()) {
-        if (t.hitCd > 0 || t.mood === 'gone' || t.mood === 'pond') continue;
+        if (t.hitCd > 0 || t.tumble > 0 || t.dazed > 0 || t.mood === 'gone' || t.mood === 'pond') continue;
         const rr = 1.6 * t.scale + 0.4;
         if (dist2(p.x, p.z, t.x, t.z) < rr * rr) {
-          t.hitCd = 1.2;
           const ang = Math.atan2(t.x - p.x, t.z - p.z);
-          const f = 9;
-          t.vx += Math.sin(ang) * f;
-          t.vz += Math.cos(ang) * f;
+          const f = TUMBLE.chargeForce * rand(0.9, 1.15);
           this.scareTourist(t, 'charge');
+          this.startTumble(t, Math.sin(ang) * f, Math.cos(ang) * f, rand(TUMBLE.chargeVYMin, TUMBLE.chargeVYMax), rand(TUMBLE.spinMin, TUMBLE.spinMax), this.chargeChainId);
+          this.lastAttackTime = this.time;
           this.emit({ kind: 'particles', preset: 'hit', x: t.x, z: t.z });
           this.emit({ kind: 'shake', mag: 0.25 });
           p.squish = 1;
@@ -357,11 +369,15 @@ export class World {
     p.biteCd = PLAYER.biteCd;
     p.animAttack = 0.22;
     p.squish = 0.8;
+    this.lastAttackTime = this.time;
     this.emit({ kind: 'sfx', name: 'bite' });
     const target = this.closestTourist(p.x, p.z, PLAYER.biteRange, p.facing, PLAYER.biteArc);
     if (target) {
       p.facing = Math.atan2(target.x - p.x, target.z - p.z);
       this.scareTourist(target, 'bite');
+      // bite with force: comedic hop-tumble away from Munch
+      const ang = Math.atan2(target.x - p.x, target.z - p.z);
+      this.startTumble(target, Math.sin(ang) * TUMBLE.biteForce, Math.cos(ang) * TUMBLE.biteForce, rand(TUMBLE.biteVYMin, TUMBLE.biteVYMax), rand(TUMBLE.spinMin, TUMBLE.spinMax) * 0.7, ++this.chainSeq);
       if (target.item === 'selfie') this.destroySelfie(target);
       this.emit({ kind: 'particles', preset: 'hit', x: target.x, z: target.z });
       this.emit({ kind: 'shake', mag: 0.15 });
@@ -386,9 +402,11 @@ export class World {
     p.headbuttCd = PLAYER.headbuttCd;
     p.animHeadbutt = 0.35;
     p.squish = 1;
+    this.lastAttackTime = this.time;
     this.emit({ kind: 'sfx', name: 'headbutt' });
     this.emit({ kind: 'shake', mag: 0.3 });
     let hitAny = false;
+    const chainId = ++this.chainSeq; // one swing = one bowling chain
     for (const t of this.tourists.values()) {
       if (t.mood === 'gone' || t.mood === 'pond') continue;
       const d2 = dist2(p.x, p.z, t.x, t.z);
@@ -400,11 +418,11 @@ export class World {
       while (d < -Math.PI) d += TAU;
       if (Math.abs(d) > PLAYER.headbuttArc / 2) continue;
       hitAny = true;
-      t.vx += Math.sin(ang) * this.headbuttForce;
-      t.vz += Math.cos(ang) * this.headbuttForce;
+      this.scareTourist(t, 'headbutt');
+      // high-arc launch: tourists flip head over heels
+      this.startTumble(t, Math.sin(ang) * this.headbuttForce, Math.cos(ang) * this.headbuttForce, rand(TUMBLE.headbuttVYMin, TUMBLE.headbuttVYMax), rand(TUMBLE.spinMin, TUMBLE.spinMax), chainId);
       if (t.item === 'selfie') this.destroySelfie(t);
       else this.dropItem(t, true);
-      this.scareTourist(t, 'headbutt');
       this.emit({ kind: 'particles', preset: 'hit', x: t.x, z: t.z });
     }
     if (hitAny) p.squish = 1.2;
@@ -442,6 +460,7 @@ export class World {
     p.splashCd = PLAYER.splashCd;
     p.animSplash = 0.5;
     p.squish = 1.2;
+    this.lastAttackTime = this.time;
     const r = this.splashRadius;
     this.emit({ kind: 'sfx', name: 'splash' });
     this.emit({ kind: 'particles', preset: 'splash', x: p.x, z: p.z, count: 30 });
@@ -461,35 +480,52 @@ export class World {
     const reach = fromCharge ? 1.5 : PLAYER.headbuttRange;
     for (const c of this.trashCans) {
       if (c.toppled) continue;
-      if (dist2(p.x, p.z, c.x, c.z) < reach * reach) {
-        c.toppled = true;
-        this.stats.trash++;
-        this.addScore(SCORE.trash, c.x, c.z, '+TRASH CAN', 'normal', CHAOS.trash);
-        this.emit({ kind: 'sfx', name: 'clatter' });
-        this.emit({ kind: 'particles', preset: 'trash', x: c.x, z: c.z, count: 14 });
-        this.emit({ kind: 'shake', mag: 0.2 });
-        this.scareArea(c.x, c.z, 5, 0.5);
-      }
+      if (dist2(p.x, p.z, c.x, c.z) < reach * reach) this.toppleTrashCan(c);
     }
     if (this.cart && !this.cart.toppled) {
       const cr = 2.1;
-      if (dist2(p.x, p.z, this.cart.x, this.cart.z) < (reach + cr) * (reach + cr) * 0.5) {
-        this.cart.toppled = true;
-        this.stats.cart++;
-        const label = this.cart.kind === 'cake' ? 'CAKE CATASTROPHE! +40' : 'FOOD CART TOPPLED! +40';
-        this.addScore(SCORE.cart, this.cart.x, this.cart.z, label, 'gold', CHAOS.cart);
-        this.emit({ kind: 'sfx', name: 'clatter' });
-        this.emit({ kind: 'sfx', name: 'splat' });
-        this.emit({ kind: 'particles', preset: this.cart.kind === 'cake' ? 'cake' : 'food', x: this.cart.x, z: this.cart.z, count: 30 });
-        this.emit({ kind: 'shake', mag: 0.5 });
-        // item shower: scattered snacks & splats
-        for (let i = 0; i < 7; i++) {
-          const id = this.nextId++;
-          const kind: 'soda' | 'icecream' | 'snack' = i % 3 === 0 ? 'soda' : i % 3 === 1 ? 'icecream' : 'snack';
-          this.foods.set(id, { id, x: this.cart.x + rand(-3, 3), z: this.cart.z + rand(-3, 3), kind, ttl: 14 });
-        }
-        this.scareArea(this.cart.x, this.cart.z, 8, 1);
-      }
+      if (dist2(p.x, p.z, this.cart.x, this.cart.z) < (reach + cr) * (reach + cr) * 0.5) this.toppleCart();
+    }
+  }
+
+  private toppleTrashCan(c: TrashCanState): void {
+    c.toppled = true;
+    this.stats.trash++;
+    this.addScore(SCORE.trash, c.x, c.z, '+TRASH CAN', 'normal', CHAOS.trash);
+    this.emit({ kind: 'sfx', name: 'clatter' });
+    this.emit({ kind: 'particles', preset: 'trash', x: c.x, z: c.z, count: 14 });
+    this.emit({ kind: 'shake', mag: 0.2 });
+    this.scareArea(c.x, c.z, 5, 0.5);
+  }
+
+  private toppleCart(): void {
+    if (!this.cart || this.cart.toppled) return;
+    this.cart.toppled = true;
+    this.stats.cart++;
+    const label = this.cart.kind === 'cake' ? 'CAKE CATASTROPHE! +40' : 'FOOD CART TOPPLED! +40';
+    this.addScore(SCORE.cart, this.cart.x, this.cart.z, label, 'gold', CHAOS.cart);
+    this.emit({ kind: 'sfx', name: 'clatter' });
+    this.emit({ kind: 'sfx', name: 'splat' });
+    this.emit({ kind: 'particles', preset: this.cart.kind === 'cake' ? 'cake' : 'food', x: this.cart.x, z: this.cart.z, count: 30 });
+    this.emit({ kind: 'shake', mag: 0.5 });
+    // item shower: scattered snacks & splats
+    for (let i = 0; i < 7; i++) {
+      const id = this.nextId++;
+      const kind: 'soda' | 'icecream' | 'snack' = i % 3 === 0 ? 'soda' : i % 3 === 1 ? 'icecream' : 'snack';
+      this.foods.set(id, { id, x: this.cart.x + rand(-3, 3), z: this.cart.z + rand(-3, 3), kind, ttl: 14 });
+    }
+    this.scareArea(this.cart.x, this.cart.z, 8, 1);
+  }
+
+  /** A tumbling body crashing into props knocks them over. */
+  private tumbleProps(t: TouristState): void {
+    for (const c of this.trashCans) {
+      if (c.toppled) continue;
+      if (dist2(t.x, t.z, c.x, c.z) < TUMBLE.propRadius * TUMBLE.propRadius) this.toppleTrashCan(c);
+    }
+    if (this.cart && !this.cart.toppled) {
+      const cr = 2.1;
+      if (dist2(t.x, t.z, this.cart.x, this.cart.z) < cr * cr) this.toppleCart();
     }
   }
 
@@ -655,8 +691,10 @@ export class World {
       tz = s.z;
     }
     const itemRoll = Math.random();
+    const photog = !vip && Math.random() < PHOTO.chance;
     let item: ItemKind = 'none';
     if (vip) item = 'selfie';
+    else if (photog) item = 'camera';
     else if (this.config.event === 'feeding' && itemRoll < 0.45) item = 'food';
     else if (itemRoll < 0.28) item = 'soda';
     else if (itemRoll < 0.45) item = 'icecream';
@@ -672,16 +710,25 @@ export class World {
       eyeDart: rand(0, 2), pupilX: 0, pupilY: 0,
       skin: Math.floor(rand(0, 5)), shirt: Math.floor(rand(0, 8)), pants: Math.floor(rand(0, 6)),
       hitCd: 0,
+      tumble: 0, tumbleVX: 0, tumbleVZ: 0, tumbleVY: 0, tumbleY: 0,
+      tumbleRot: 0, spin: 0, dazed: 0, chainId: 0,
+      expression: 'calm', surprised: 0,
+      photog, photoT: 0, photoCd: rand(1, 5), photoTaken: false,
+      shoved: 0, fleeT: 0,
     };
     this.tourists.set(id, t);
   }
 
   private scareTourist(t: TouristState, cause: string): void {
     if (t.mood === 'gone' || t.mood === 'pond') return;
+    if (t.tumble > 0 || t.dazed > 0) return; // already flying/dazed: can't be re-scared
     const wasCalm = t.mood !== 'panic' && t.mood !== 'flee';
     t.fear = 1;
+    t.fleeT = 0;
+    t.surprised = TOURIST.surprisedTime; // deer-in-headlights beat
     if (wasCalm) {
       this.stats.scared++;
+      this.emit({ kind: 'popup', x: t.x, z: t.z, text: '!', cls: 'info' });
       if (t.vip) {
         this.stats.vip++;
         this.addScore(SCORE.vip, t.x, t.z, 'VIP TERRIFIED!', 'gold', CHAOS.vip);
@@ -698,7 +745,7 @@ export class World {
   }
 
   private dropItem(t: TouristState, force: boolean): void {
-    if (t.dropped || t.item === 'none' || t.item === 'food') return;
+    if (t.dropped || t.item === 'none' || t.item === 'food' || t.item === 'camera') return;
     const chance = TOURIST.dropChance + (this.slippery ? 0.25 : 0);
     if (!force && Math.random() > chance) return;
     t.dropped = true;
@@ -763,6 +810,41 @@ export class World {
         t.pupilY = rand(-0.6, 0.6);
       }
 
+      // ---- expression + freeze timers ----
+      t.surprised = Math.max(0, t.surprised - dt);
+      t.shoved = Math.max(0, t.shoved - dt);
+      t.photoCd = Math.max(0, t.photoCd - dt);
+      if (t.mood === 'panic' || t.mood === 'flee') t.fleeT += dt;
+      else t.fleeT = 0;
+      if (t.mood === 'panic' || t.mood === 'flee' || t.mood === 'pond') {
+        t.expression = t.surprised > 0 ? 'surprised' : 'panic';
+      } else {
+        t.expression = t.surprised > 0 ? 'surprised' : 'calm';
+      }
+
+      // ---- dazed: lying on the ground seeing stars, then gets up and flees ----
+      if (t.dazed > 0) {
+        t.dazed -= dt;
+        t.vx = 0;
+        t.vz = 0;
+        if (Math.random() < dt * 2.5) {
+          this.emit({ kind: 'particles', preset: 'stars', x: t.x, z: t.z, count: 1 });
+        }
+        if (t.dazed <= 0) {
+          t.dazed = 0;
+          t.mood = 'flee';
+          t.t = 0;
+        }
+        t.onPlatform = this.onPlatformRect(t.x, t.z);
+        continue;
+      }
+
+      // ---- tumbling: ballistic flight, bounces, skid, chain reactions ----
+      if (t.tumble > 0) {
+        this.updateTumble(t, dt);
+        continue;
+      }
+
       if (t.slip > 0) {
         t.slip -= dt;
         t.vx *= 1 - clamp(4 * dt, 0, 1);
@@ -777,6 +859,19 @@ export class World {
       let desiredX = 0;
       let desiredZ = 0;
       let desiredSpeed = 0;
+
+      // photo tourists: Munch looks calm → sneak over for a picture
+      if (
+        t.photog && t.photoCd <= 0 && !p.dead &&
+        (t.mood === 'wander' || t.mood === 'gawk' || t.mood === 'arrive' || t.mood === 'feed') &&
+        !p.charging && this.time - this.lastAttackTime > PHOTO.calmTime &&
+        dist2(t.x, t.z, p.x, p.z) < PHOTO.range * PHOTO.range
+      ) {
+        t.mood = 'photo';
+        t.t = 0;
+        t.photoT = 0;
+        t.photoTaken = false;
+      }
 
       switch (t.mood) {
         case 'arrive': {
@@ -857,6 +952,58 @@ export class World {
           }
           break;
         }
+        case 'photo': {
+          // approach Munch for a picture; abort if he turns violent
+          this.facePlayer(t);
+          const d2p = dist2(t.x, t.z, p.x, p.z);
+          if (p.dead || this.time - this.lastAttackTime < PHOTO.abortTime) {
+            // Munch just attacked someone nearby — spook and run
+            t.mood = 'wander';
+            t.t = 0;
+            t.photoCd = rand(PHOTO.cdMin, PHOTO.cdMax);
+            t.fear += 0.9;
+            this.facePlayer(t);
+            break;
+          }
+          if (p.charging && d2p < 81) {
+            t.mood = 'wander';
+            t.t = 0;
+            t.photoCd = rand(3, 6);
+            t.fear += 0.4;
+            break;
+          }
+          const stop = PHOTO.stopMin + ((t.id * 37) % 10) * (PHOTO.stopVar / 10);
+          if (d2p > stop * stop) {
+            desiredSpeed = walkSpeed * 1.2;
+            desiredX = p.x - t.x;
+            desiredZ = p.z - t.z;
+            t.photoT = 0;
+            if (t.t > 10) {
+              // lost interest (Munch moved too far away)
+              t.mood = 'wander';
+              t.t = 0;
+              t.photoCd = rand(5, 9);
+            }
+          } else {
+            // in position: raise the camera, wait a beat, SNAP
+            desiredSpeed = 0;
+            t.photoT += dt;
+            if (!t.photoTaken && t.photoT >= PHOTO.aimTime) {
+              t.photoTaken = true;
+              this.stats.photos++;
+              this.addScore(SCORE.photo, t.x, t.z, '📸', 'info', CHAOS.photo);
+              this.emit({ kind: 'sfx', name: 'shutter' });
+              this.emit({ kind: 'particles', preset: 'flash', x: t.x, z: t.z, count: 6 });
+            }
+            if (t.photoT >= PHOTO.aimTime + PHOTO.linger) {
+              t.mood = 'wander';
+              t.t = 0;
+              t.photoCd = rand(PHOTO.cdMin, PHOTO.cdMax);
+              this.emit({ kind: 'particles', preset: 'hearts', x: t.x, z: t.z, count: 2 });
+            }
+          }
+          break;
+        }
         case 'panic': {
           // run away from player in blind panic
           if (!t.screamed) {
@@ -864,9 +1011,9 @@ export class World {
             this.emit({ kind: 'sfx', name: 'scream', x: t.x, z: t.z });
             this.emit({ kind: 'particles', preset: 'panic', x: t.x, z: t.z, count: 3 });
           }
-          const away = Math.atan2(t.x - p.x, t.z - p.z) + Math.sin(t.t * 7 + t.id) * 0.7;
-          desiredX = Math.sin(away);
-          desiredZ = Math.cos(away);
+          const dir = this.fleeDirection(t);
+          desiredX = dir.x;
+          desiredZ = dir.z;
           desiredSpeed = panicSpeed;
           if (t.t > rand(1.2, 2.2)) {
             t.mood = 'flee';
@@ -876,11 +1023,10 @@ export class World {
         }
         case 'flee': {
           fleeing++;
-          // run to nearest gate
-          const gx = GATES.tourist.x;
-          const gz = GATES.tourist.z;
-          desiredX = gx - t.x;
-          desiredZ = gz - t.z;
+          // run directly away from Munch first, then blend toward the gate
+          const dir = this.fleeDirection(t);
+          desiredX = dir.x;
+          desiredZ = dir.z;
           desiredSpeed = panicSpeed;
           // slipping
           const slipChance = (TOURIST.slipBase + t.clumsy * 0.12 + (this.slippery ? 0.12 : 0)) * dt;
@@ -890,7 +1036,7 @@ export class World {
             this.emit({ kind: 'particles', preset: 'dust', x: t.x, z: t.z, count: 5 });
             this.dropItem(t, true);
           }
-          if (dist2(t.x, t.z, gx, gz) < 4) {
+          if (dist2(t.x, t.z, GATES.tourist.x, GATES.tourist.z) < 4) {
             t.mood = 'gone';
           }
           break;
@@ -915,6 +1061,9 @@ export class World {
           break;
       }
 
+      // deer-in-headlights: barely move during the surprise beat
+      if (t.surprised > 0) desiredSpeed *= TOURIST.surprisedSpeed;
+
       // --- steering / integration ---
       const dl = Math.hypot(desiredX, desiredZ);
       if (dl > 0.01 && desiredSpeed > 0) {
@@ -935,16 +1084,7 @@ export class World {
 
       // fell in the pond?
       if (t.mood !== 'pond' && t.mood !== 'gone' && this.inPond(t.x, t.z, -0.8)) {
-        t.mood = 'pond';
-        t.t = 0;
-        t.soak = 8;
-        t.vx = 0;
-        t.vz = 0;
-        this.stats.pond++;
-        this.addScore(SCORE.pondFall, t.x, t.z, '+POND PLUNGE', 'gold', CHAOS.pondFall);
-        this.emit({ kind: 'sfx', name: 'plop' });
-        this.emit({ kind: 'particles', preset: 'splash', x: t.x, z: t.z, count: 18 });
-        this.emit({ kind: 'shake', mag: 0.2 });
+        this.pondPlunge(t);
       }
 
       // bounds: tourists stay inside enclosure; fleeing ones exit through gate;
@@ -997,12 +1137,19 @@ export class World {
         }
       }
 
-      // bump into others while panicking -> chain
+      // bump into others while panicking -> chain fear + a gentle shove (pileups!)
       if (t.mood === 'panic' || t.mood === 'flee') {
         for (const o of this.tourists.values()) {
           if (o === t || o.mood === 'panic' || o.mood === 'flee' || o.mood === 'gone' || o.mood === 'pond') continue;
+          if (o.tumble > 0 || o.dazed > 0) continue;
           if (dist2(t.x, t.z, o.x, o.z) < 1.1) {
             o.fear += 0.65;
+            if (o.shoved <= 0) {
+              o.shoved = FLEE.shoveCd;
+              const a = Math.atan2(o.x - t.x, o.z - t.z);
+              o.vx += Math.sin(a) * FLEE.shoveForce;
+              o.vz += Math.cos(a) * FLEE.shoveForce;
+            }
           }
         }
       }
@@ -1021,6 +1168,194 @@ export class World {
       this.emit({ kind: 'sfx', name: 'stampede' });
       this.emit({ kind: 'shake', mag: 0.55 });
     }
+  }
+
+  // =========================================================================
+  // Tumble physics: launch → ballistic flip → bounce → skid → dazed → flee
+  // =========================================================================
+  private startTumble(t: TouristState, vx: number, vz: number, vy: number, spin: number, chainId: number): void {
+    const relaunch = t.tumble > 0 || t.dazed > 0; // juggled again: keep old chain
+    t.tumble = TUMBLE.maxTime;
+    t.tumbleVX = vx;
+    t.tumbleVZ = vz;
+    t.tumbleVY = vy;
+    t.tumbleY = Math.max(t.tumbleY, 0);
+    t.tumbleRot = relaunch ? t.tumbleRot : 0;
+    t.spin = spin * (Math.random() < 0.5 ? -1 : 1);
+    t.dazed = 0;
+    t.slip = 0;
+    t.vx = vx;
+    t.vz = vz;
+    t.hitCd = Math.max(t.hitCd, TUMBLE.hitCd);
+    if (!relaunch) {
+      t.chainId = chainId;
+      this.registerChainTumble(chainId, t);
+    }
+    this.emit({ kind: 'shake', mag: 0.12 });
+  }
+
+  /** Bowling scoring: count tumbles per attack chain, award at 2 and 3. */
+  private registerChainTumble(chainId: number, t: TouristState): void {
+    if (chainId <= 0 || this.config.attract) return;
+    const c = this.chains.get(chainId) ?? { n: 0, t: this.time };
+    c.n++;
+    c.t = this.time;
+    this.chains.set(chainId, c);
+    if (c.n === 2) {
+      this.stats.bowling++;
+      this.addScore(SCORE.bowling, t.x, t.z, 'TOURIST BOWLING', 'gold', CHAOS.bowling);
+      this.emit({ kind: 'shake', mag: 0.3 });
+    } else if (c.n === 3) {
+      this.stats.strikes++;
+      this.addScore(SCORE.strike, t.x, t.z, 'STRIKE!!', 'gold', CHAOS.strike);
+      this.emit({ kind: 'sfx', name: 'coin' });
+      this.emit({ kind: 'shake', mag: 0.5 });
+    }
+  }
+
+  private updateTumble(t: TouristState, dt: number): void {
+    t.tumble -= dt;
+    // ballistic flight
+    t.tumbleVY -= TUMBLE.gravity * dt;
+    t.tumbleY += t.tumbleVY * dt;
+    if (t.tumbleY > TUMBLE.maxY) {
+      // ceiling: relaunches can juggle, never orbit
+      t.tumbleY = TUMBLE.maxY;
+      t.tumbleVY = Math.min(t.tumbleVY, 0);
+    }
+    t.tumbleRot += t.spin * dt;
+    if (t.tumbleY <= 0 && t.tumbleVY < 0) {
+      t.tumbleY = 0;
+      if (t.tumbleVY < -TUMBLE.minBounceVY) {
+        // boing! bounce with energy loss
+        t.tumbleVY = -t.tumbleVY * TUMBLE.restitution;
+        t.tumbleVX *= TUMBLE.bounceFric;
+        t.tumbleVZ *= TUMBLE.bounceFric;
+        t.spin *= 0.55;
+        this.emit({ kind: 'sfx', name: 'boing', x: t.x, z: t.z });
+        this.emit({ kind: 'particles', preset: 'dust', x: t.x, z: t.z, count: 5 });
+      } else {
+        // final touchdown → skid flat on their back
+        t.tumbleVY = 0;
+        t.spin = 0;
+        t.tumbleRot = -Math.PI / 2 * 0.92;
+        this.emit({ kind: 'particles', preset: 'dust', x: t.x, z: t.z, count: 6 });
+      }
+    }
+    const grounded = t.tumbleY <= 0 && t.tumbleVY === 0;
+    if (grounded) {
+      const f = clamp(TUMBLE.skidFric * dt, 0, 1);
+      t.tumbleVX -= t.tumbleVX * f;
+      t.tumbleVZ -= t.tumbleVZ * f;
+      if (Math.hypot(t.tumbleVX, t.tumbleVZ) > 2 && Math.random() < dt * 14) {
+        this.emit({ kind: 'particles', preset: 'dust', x: t.x, z: t.z, count: 2 });
+      }
+    }
+    t.x += t.tumbleVX * dt;
+    t.z += t.tumbleVZ * dt;
+    t.vx = t.tumbleVX;
+    t.vz = t.tumbleVZ;
+    const speed = Math.hypot(t.tumbleVX, t.tumbleVZ);
+    if (speed > 0.6) t.facing = Math.atan2(t.tumbleVX, t.tumbleVZ);
+
+    // splash! tumbled straight into the pond
+    if (this.inPond(t.x, t.z, -0.8)) {
+      this.pondPlunge(t);
+      return;
+    }
+    // crash into props
+    this.tumbleProps(t);
+    // bowling-pin chain reaction: knock bystanders into tumbles of their own
+    if (speed > 2 && t.tumbleY < 1.2) {
+      for (const o of this.tourists.values()) {
+        if (o === t || o.tumble > 0 || o.dazed > 0 || o.hitCd > 0) continue;
+        if (o.mood === 'gone' || o.mood === 'pond') continue;
+        const rr = TUMBLE.chainRadius * (0.6 + o.scale * 0.5);
+        if (dist2(t.x, t.z, o.x, o.z) < rr * rr) {
+          const a = Math.atan2(o.x - t.x, o.z - t.z);
+          const sp = Math.max(speed * TUMBLE.chainFactor, TUMBLE.chainMinSpeed);
+          this.scareTourist(o, 'chain');
+          this.startTumble(o, Math.sin(a) * sp, Math.cos(a) * sp, rand(TUMBLE.chainVYMin, TUMBLE.chainVYMax), rand(TUMBLE.spinMin, TUMBLE.spinMax), t.chainId);
+          t.tumbleVX *= 0.7;
+          t.tumbleVZ *= 0.7;
+          this.emit({ kind: 'particles', preset: 'hit', x: o.x, z: o.z });
+          this.emit({ kind: 'sfx', name: 'boing', x: o.x, z: o.z });
+        }
+      }
+    }
+    // bounds: fence stops the slide unless they fly through the gate mouth
+    const h = ARENA.half - 0.6;
+    const inGapX = t.x > GATES.fenceGap.x0 && t.x < GATES.fenceGap.x1;
+    const onPath = t.z > h && (inGapX || this.gapOpen);
+    t.x = clamp(t.x, onPath ? -40 : -h, onPath ? 40 : h);
+    if (t.z > h && !onPath) t.z = h;
+    t.z = clamp(t.z, -h, ARENA.pathZ1 - 1);
+    t.onPlatform = this.onPlatformRect(t.x, t.z);
+
+    // skid ran out of steam → dazed on the ground
+    if (grounded && Math.hypot(t.tumbleVX, t.tumbleVZ) < TUMBLE.skidStop) {
+      t.tumble = 0;
+      t.tumbleVX = 0;
+      t.tumbleVZ = 0;
+      t.vx = 0;
+      t.vz = 0;
+      t.dazed = rand(TUMBLE.dazeMin, TUMBLE.dazeMax);
+      this.emit({ kind: 'particles', preset: 'stars', x: t.x, z: t.z, count: 5 });
+      this.emit({ kind: 'sfx', name: 'tweet', x: t.x, z: t.z });
+      return;
+    }
+    // safety: never tumble forever
+    if (t.tumble <= 0) {
+      t.tumble = 0;
+      t.tumbleY = 0;
+      t.tumbleVY = 0;
+      t.spin = 0;
+      t.tumbleRot = -Math.PI / 2 * 0.92;
+      t.dazed = rand(TUMBLE.dazeMin, TUMBLE.dazeMax);
+    }
+  }
+
+  /** Tourist falls in the pond (walked, slipped or tumbled in). */
+  private pondPlunge(t: TouristState): void {
+    t.mood = 'pond';
+    t.t = 0;
+    t.soak = 8;
+    t.vx = 0;
+    t.vz = 0;
+    t.tumble = 0;
+    t.tumbleVX = 0;
+    t.tumbleVZ = 0;
+    t.tumbleVY = 0;
+    t.tumbleY = 0;
+    t.spin = 0;
+    t.tumbleRot = 0;
+    t.dazed = 0;
+    this.stats.pond++;
+    this.addScore(SCORE.pondFall, t.x, t.z, '+POND PLUNGE', 'gold', CHAOS.pondFall);
+    this.emit({ kind: 'sfx', name: 'plop' });
+    this.emit({ kind: 'particles', preset: 'splash', x: t.x, z: t.z, count: 18 });
+    this.emit({ kind: 'shake', mag: 0.2 });
+  }
+
+  /**
+   * Flee steering: for the first FLEE.repelTime seconds run on a pure
+   * repulsion vector directly away from the player (with per-tourist jitter),
+   * then blend toward the tourist gate over FLEE.blendTime seconds.
+   */
+  private fleeDirection(t: TouristState): { x: number; z: number } {
+    const p = this.player;
+    const w = clamp((t.fleeT - FLEE.repelTime) / FLEE.blendTime, 0, 1);
+    const jitter = Math.sin(t.id * 2.3) * 0.35;
+    const awayA = Math.atan2(t.x - p.x, t.z - p.z) + jitter + Math.sin(t.t * 7 + t.id) * 0.3 * (1 - w);
+    let dx = Math.sin(awayA) * (1 - w);
+    let dz = Math.cos(awayA) * (1 - w);
+    const gx = GATES.tourist.x - t.x;
+    const gz = GATES.tourist.z - t.z;
+    const gl = Math.hypot(gx, gz) || 1;
+    dx += (gx / gl) * w;
+    dz += (gz / gl) * w;
+    const l = Math.hypot(dx, dz) || 1;
+    return { x: dx / l, z: dz / l };
   }
 
   // =========================================================================
