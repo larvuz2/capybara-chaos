@@ -86,8 +86,11 @@ function mesh(g: THREE.BufferGeometry, m: THREE.Material, x = 0, y = 0, z = 0, s
 
 // ---- palettes ---------------------------------------------------------------
 export const SKINS = [0xf2c89b, 0xd9a066, 0xa06a3b, 0x6e4a2a, 0xf7d7b5];
-export const SHIRTS = [0xff5d8f, 0xffbe0b, 0x3a86ff, 0xfb5607, 0x8338ec, 0x06d6a0, 0xef476f, 0x118ab2];
+// bright tourist shirts, incl. loud hawaiian vibes
+export const SHIRTS = [0xff5d8f, 0xffbe0b, 0x3a86ff, 0xfb5607, 0x8338ec, 0x06d6a0, 0xef476f, 0x118ab2, 0xffd60a, 0x70e000, 0x00bbf9, 0xff70a6];
 export const PANTS = [0x3d405b, 0x5f6caf, 0x8d6e63, 0x2f4858, 0x6a4c93, 0x457b9d];
+// 0 blonde (common), 1 light brown, 2 brown, 3 black, 4 red, 5 pink, 6 blue
+export const HAIR_COLORS = [0xf2d15c, 0xb08850, 0x6e4a2a, 0x2b2320, 0xc1440e, 0xff8fb1, 0x5dade2];
 
 // ============================================================================
 // CAPYBARA — chunky grumpy boy
@@ -256,22 +259,50 @@ export function buildTourist(t: TouristState): TouristRig {
   browL.visible = false;
   browR.visible = false;
   head.add(browL, browR);
-  // hair / hat variety
-  const hairRoll = (t.id * 7) % 5;
+  // hair / hat variety (driven by sim-rolled t.hair / t.hairColor)
+  const hairMat = mat(HAIR_COLORS[t.hairColor % HAIR_COLORS.length]);
   if (t.vip) {
     const hat = mesh(cylGeo(0.2, 0.22, 0.28, 10), mat(0x222222), 0, 0.42, 0);
     const brim = mesh(cylGeo(0.34, 0.34, 0.04, 12), mat(0x222222), 0, 0.3, 0);
     head.add(hat, brim);
-  } else if (hairRoll === 0) {
+  } else if (t.hair === 1) {
+    // baseball cap, clashing with the shirt of course
     const cap = mesh(sphGeo(0.36, 10, 6), mat(SHIRTS[(t.shirt + 3) % SHIRTS.length]), 0, 0.12, 0);
     cap.scale.set(1, 0.55, 1);
     head.add(cap);
-  } else if (hairRoll === 1) {
-    const hair = mesh(boxGeo(0.5, 0.14, 0.5), mat(0x4a3220), 0, 0.32, 0, false);
+  } else if (t.hair === 2) {
+    // flat mop
+    const hair = mesh(boxGeo(0.5, 0.14, 0.5), hairMat, 0, 0.32, 0, false);
     head.add(hair);
-  } else if (hairRoll === 2) {
-    const bun = mesh(sphGeo(0.16, 8, 6), mat(0x6e4a2a), 0, 0.38, -0.05, false);
+  } else if (t.hair === 3) {
+    // top bun
+    const bun = mesh(sphGeo(0.16, 8, 6), hairMat, 0, 0.38, -0.05, false);
     head.add(bun);
+  } else if (t.hair === 4) {
+    // mohawk
+    const hawk = mesh(boxGeo(0.09, 0.24, 0.52), hairMat, 0, 0.38, 0, false);
+    head.add(hawk);
+  } else if (t.hair === 5) {
+    // pigtail buns x2
+    const bunL = mesh(sphGeo(0.14, 8, 6), hairMat, -0.32, 0.2, -0.05, false);
+    const bunR = mesh(sphGeo(0.14, 8, 6), hairMat, 0.32, 0.2, -0.05, false);
+    head.add(bunL, bunR);
+  } else if (t.hair === 6) {
+    // flat cap
+    const capTop = mesh(cylGeo(0.3, 0.33, 0.1, 10), mat(0x8d8a7a), 0, 0.32, 0, false);
+    const capBrim = mesh(boxGeo(0.3, 0.04, 0.2), mat(0x8d8a7a), 0, 0.28, 0.32, false);
+    head.add(capTop, capBrim);
+  } else if (t.hair === 7) {
+    // sun hat
+    const brim = mesh(cylGeo(0.52, 0.52, 0.04, 12), mat(0xf0e3b2), 0, 0.26, 0, false);
+    const dome = mesh(sphGeo(0.28, 10, 6), mat(0xf0e3b2), 0, 0.3, 0, false);
+    dome.scale.set(1, 0.6, 1);
+    head.add(brim, dome);
+  }
+  // sunglasses: ~1 in 4 tourists
+  if (t.glasses && !t.vip) {
+    const shades = mesh(boxGeo(0.46, 0.1, 0.06), mat(0x141414, { rough: 0.25 }), 0, 0.05, 0.3, false);
+    head.add(shades);
   }
 
   // arms
@@ -310,6 +341,22 @@ export function buildTourist(t: TouristState): TouristRig {
     glass.rotation.x = Math.PI / 2;
     const flashBulb = mesh(boxGeo(0.07, 0.05, 0.04), mat(0xf5f0e0, { emissive: 0xffffff, emissiveIntensity: 0.6 }), -0.07, 0.1, 0.02, false);
     itemHolder.add(camBody, lens, glass, flashBulb);
+  } else if (t.item === 'popcorn') {
+    // striped red/white bucket with popcorn bumps
+    const bucket = mesh(cylGeo(0.1, 0.075, 0.2, 10), mat(0xf5f0e0), 0, 0, 0, false);
+    const stripe1 = mesh(cylGeo(0.102, 0.098, 0.045, 10), mat(0xe63946), 0, 0.05, 0, false);
+    const stripe2 = mesh(cylGeo(0.09, 0.084, 0.045, 10), mat(0xe63946), 0, -0.05, 0, false);
+    itemHolder.add(bucket, stripe1, stripe2);
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * Math.PI * 2;
+      itemHolder.add(mesh(sphGeo(0.04, 6, 5), mat(0xfff3c4, { flat: false }), Math.sin(a) * 0.05, 0.11, Math.cos(a) * 0.05, false));
+    }
+  } else if (t.item === 'smoke') {
+    // tiny cigarette held out + glowing ember
+    const cig = mesh(cylGeo(0.014, 0.014, 0.13, 5), mat(0xf5f0e0), 0, 0, 0, false);
+    cig.rotation.z = Math.PI / 2;
+    const ember = mesh(sphGeo(0.02, 6, 5), mat(0xff6b35, { emissive: 0xff4400, emissiveIntensity: 1.6 }), 0.075, 0, 0, false);
+    itemHolder.add(cig, ember);
   }
 
   group.scale.setScalar(t.scale);
@@ -446,6 +493,120 @@ export function buildFoodMesh(kind: string): THREE.Group {
     g.add(snack);
   }
   return g;
+}
+
+// ============================================================================
+// EMERGENT CHAOS PROPS — fires, popcorn spills, seagulls, scorch marks
+// ============================================================================
+export interface FireRig {
+  group: THREE.Group;
+  flames: THREE.Mesh[];
+  glow: THREE.Mesh;
+  light: THREE.PointLight;
+}
+
+export function buildFire(): FireRig {
+  const group = new THREE.Group();
+  // charred base
+  const base = mesh(cylGeo(0.42, 0.5, 0.08, 9), mat(0x241a12), 0, 0.04, 0, false);
+  group.add(base);
+  // flickering flame cones (outer → inner, animated in scene)
+  const flames: THREE.Mesh[] = [];
+  const defs: [number, number, number, number][] = [
+    [0.42, 0.95, 0xff7b24, 0], // outer orange
+    [0.3, 0.75, 0xffb020, 0.05], // mid amber
+    [0.17, 0.5, 0xffe08a, -0.04], // inner yellow
+  ];
+  for (const [r, h, col, off] of defs) {
+    const f = mesh(coneGeo(r, h, 7), mat(col, { emissive: col, emissiveIntensity: 1.5 }), off, 0.1 + h / 2, -off * 0.6, false);
+    flames.push(f);
+    group.add(f);
+  }
+  // warm additive ground glow
+  const glowGeo = new THREE.CircleGeometry(1.7, 20);
+  const glow = new THREE.Mesh(glowGeo, new THREE.MeshBasicMaterial({
+    color: 0xff8c3a, transparent: true, opacity: 0.22,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  }));
+  glow.rotation.x = -Math.PI / 2;
+  glow.position.y = 0.06;
+  group.add(glow);
+  // real light so the fire actually lights the grass (few concurrent max)
+  const light = new THREE.PointLight(0xff8c3a, 10, 8, 1.8);
+  light.position.y = 0.9;
+  group.add(light);
+  return { group, flames, glow, light };
+}
+
+export function buildSpill(): THREE.Group {
+  const g = new THREE.Group();
+  // scattered popcorn pile
+  const cols = [0xfff7e0, 0xffe9a8, 0xffffff];
+  for (let i = 0; i < 7; i++) {
+    const a = (i / 7) * Math.PI * 2 + i;
+    const r = i === 0 ? 0 : 0.16 + (i % 3) * 0.14;
+    const k = mesh(sphGeo(0.075, 6, 5), mat(cols[i % cols.length], { flat: false }), Math.sin(a) * r, 0.05, Math.cos(a) * r, false);
+    k.scale.y = 0.7;
+    g.add(k);
+  }
+  // the fallen bucket, tipped on its side
+  const bucket = new THREE.Group();
+  const body = mesh(cylGeo(0.11, 0.085, 0.22, 10), mat(0xf5f0e0), 0, 0, 0, false);
+  const stripe = mesh(cylGeo(0.113, 0.108, 0.05, 10), mat(0xe63946), 0, 0.05, 0, false);
+  bucket.add(body, stripe);
+  bucket.rotation.z = Math.PI / 2 - 0.25;
+  bucket.position.set(0.42, 0.1, 0.18);
+  g.add(bucket);
+  return g;
+}
+
+export interface GullRig {
+  group: THREE.Group;
+  body: THREE.Group;
+  wingL: THREE.Group;
+  wingR: THREE.Group;
+}
+
+export function buildGull(): GullRig {
+  const group = new THREE.Group();
+  const body = new THREE.Group();
+  group.add(body);
+  const white = mat(0xfdfdf8, { flat: false, rough: 0.7 });
+  const gray = mat(0xb9c4c9);
+  const b = mesh(sphGeo(0.24, 10, 8), white, 0, 0.24, 0, false);
+  b.scale.set(0.85, 0.75, 1.25);
+  body.add(b);
+  const head = mesh(sphGeo(0.14, 8, 6), white, 0, 0.42, 0.24, false);
+  body.add(head);
+  const beak = mesh(coneGeo(0.04, 0.16, 6), mat(0xffa629), 0, 0.4, 0.42, false);
+  beak.rotation.x = Math.PI / 2;
+  body.add(beak);
+  const eyeL = mesh(sphGeo(0.025, 6, 4), mat(0x14100c), -0.07, 0.46, 0.32, false);
+  const eyeR = mesh(sphGeo(0.025, 6, 4), mat(0x14100c), 0.07, 0.46, 0.32, false);
+  body.add(eyeL, eyeR);
+  const tail = mesh(boxGeo(0.14, 0.03, 0.2), gray, 0, 0.26, -0.3, false);
+  body.add(tail);
+  // wings: pivot groups at the shoulders, flapped in scene
+  const wingL = new THREE.Group();
+  wingL.position.set(-0.12, 0.32, 0);
+  const wl = mesh(boxGeo(0.52, 0.04, 0.24), gray, -0.26, 0, 0, false);
+  wingL.add(wl);
+  const wingR = new THREE.Group();
+  wingR.position.set(0.12, 0.32, 0);
+  const wr = mesh(boxGeo(0.52, 0.04, 0.24), gray, 0.26, 0, 0, false);
+  wingR.add(wr);
+  body.add(wingL, wingR);
+  return { group, body, wingL, wingR };
+}
+
+export function buildScorch(): THREE.Mesh {
+  const geo = new THREE.CircleGeometry(0.85, 14);
+  const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+    color: 0x241a12, roughness: 1, transparent: true, opacity: 0.72,
+  }));
+  m.rotation.x = -Math.PI / 2;
+  m.receiveShadow = true;
+  return m;
 }
 
 // ============================================================================
