@@ -71,6 +71,8 @@ const BREAKDOWN: { key: keyof RunStats; label: string; pts: number }[] = [
   { key: 'bowling', label: 'Tourist bowling (2+ chain)', pts: SCORE.bowling },
   { key: 'strikes', label: 'STRIKES (3+ chain)', pts: SCORE.strike },
   { key: 'photos', label: 'Photos taken of Munch', pts: SCORE.photo },
+  { key: 'fires', label: 'Grass fires ignited', pts: SCORE.fire },
+  { key: 'gulls', label: 'Seagull swarms summoned', pts: SCORE.gulls },
 ];
 
 export default function App() {
@@ -426,7 +428,7 @@ export default function App() {
 
           {/* controls hint */}
           <div className="hud-chip absolute bottom-4 left-4 text-[11px] font-bold leading-5 text-white/80">
-            WASD move · J bite · K headbutt<br />
+            WASD move · J bite · K headbutt · U/E spin<br />
             SHIFT charge · L hide/roll · SPACE splash
           </div>
           <div ref={splashHintRef} className="hud-chip absolute bottom-4 right-4 text-sm font-extrabold text-cyan-200 transition-opacity" style={{ opacity: 0 }}>
@@ -546,6 +548,7 @@ export default function App() {
                 ['WASD / Arrows', 'Waddle around'],
                 ['J or Z', 'Bite — quick scare'],
                 ['K or X', 'Headbutt — big knockback (into the pond!)'],
+                ['U or E', 'Spin attack — 360° launch (costs 25 stamina)'],
                 ['SHIFT (hold)', 'Charge — bowl through crowds'],
                 ['L or C', 'Hide in bushes / roll in mud (speed boost)'],
                 ['SPACE', 'Splash (near pond) — AoE scare + soak'],
@@ -566,6 +569,8 @@ export default function App() {
               <span>Selfie stick wrecked <b className="float-right text-amber-300">+{SCORE.selfie}</b></span>
               <span>Trash can toppled <b className="float-right text-amber-300">+{SCORE.trash}</b></span>
               <span>Platform emptied <b className="float-right text-amber-300">+{SCORE.platform}</b></span>
+              <span>Cigarette fire <b className="float-right text-amber-300">+{SCORE.fire}</b></span>
+              <span>Seagull swarm <b className="float-right text-amber-300">+{SCORE.gulls}</b></span>
               <span>Chain actions within 4s <b className="float-right text-orange-300">COMBO x2, x3…</b></span>
             </div>
             <div className="mb-2 text-lg font-extrabold text-red-300">ESCALATION</div>
