@@ -104,12 +104,15 @@ export type TouristMood =
   | 'gawk'
   | 'feed'
   | 'suspicious'
+  | 'photo'
   | 'panic'
   | 'flee'
   | 'pond'
   | 'gone';
 
-export type ItemKind = 'none' | 'soda' | 'icecream' | 'selfie' | 'food';
+export type ItemKind = 'none' | 'soda' | 'icecream' | 'selfie' | 'food' | 'camera';
+
+export type TouristExpression = 'calm' | 'surprised' | 'panic';
 
 export interface TouristState {
   id: number;
@@ -141,6 +144,27 @@ export interface TouristState {
   shirt: number;
   pants: number;
   hitCd: number; // per-tourist charge-hit cooldown
+  // ---- tumble physics (push → crumple → fly → bounce → skid → dazed) ----
+  tumble: number; // seconds of tumble remaining (safety timeout), 0 = grounded
+  tumbleVX: number; // launch velocity (integrated while tumbling)
+  tumbleVZ: number;
+  tumbleVY: number; // vertical launch velocity
+  tumbleY: number; // height above ground while tumbling (rendered arc)
+  tumbleRot: number; // accumulated flip angle, rad (renderer rotation.x)
+  spin: number; // flip rate, rad/s
+  dazed: number; // seconds lying dazed on the ground (stars, then flee)
+  chainId: number; // bowling-chain grouping id (one attack = one chain)
+  // ---- expressions ----
+  expression: TouristExpression;
+  surprised: number; // deer-in-headlights freeze timer (~0.7s after any scare)
+  // ---- photo tourists ----
+  photog: boolean; // approaches a calm Munch for pictures
+  photoT: number; // aim timer while stopped in 'photo' mood
+  photoCd: number; // cooldown before approaching again
+  photoTaken: boolean; // shutter already fired this approach
+  // ---- flee-away-from-player ----
+  shoved: number; // cooldown for being shoved by panicked tourists
+  fleeT: number; // time since panic started (repel → gate blend)
 }
 
 export type KeeperMood = 'patrol' | 'investigate' | 'chase' | 'aim' | 'stunned';
@@ -233,6 +257,9 @@ export interface RunStats {
   platform: number;
   cart: number;
   vip: number;
+  bowling: number; // 2+ tourists tumbled in one chain
+  strikes: number; // 3+ tourists tumbled in one chain
+  photos: number; // photog pictures taken of a calm Munch
   bestCombo: number;
 }
 
