@@ -50,6 +50,11 @@ const PRESETS: Record<string, Preset> = {
   growl: { colors: [[0.7, 0.4, 0.2], [1, 0.7, 0.3]], speed: [2, 4], up: [0.5, 1.5], size: [0.3, 0.6], life: [0.35, 0.6], gravity: 1, drag: 2, spread: 1 },
   hearts: { colors: [[1, 0.4, 0.6]], speed: [0.5, 1], up: [1, 2], size: [0.3, 0.5], life: [0.6, 1], gravity: 2, drag: 1, spread: 0.6 },
   rain: { colors: [[0.6, 0.75, 0.9]], speed: [0, 0.5], up: [-22, -18], size: [0.12, 0.2], life: [0.8, 1.2], gravity: 0, drag: 0, spread: 30 },
+  smoke: { colors: [[0.55, 0.55, 0.55], [0.42, 0.42, 0.42], [0.68, 0.68, 0.68]], speed: [0.1, 0.5], up: [0.8, 1.7], size: [0.22, 0.5], life: [0.8, 1.6], gravity: 1.5, drag: 1, spread: 0.5 },
+  steam: { colors: [[0.92, 0.95, 1], [1, 1, 1], [0.8, 0.86, 0.94]], speed: [0.4, 1], up: [2, 3.6], size: [0.3, 0.55], life: [0.4, 0.85], gravity: 2, drag: 1.5, spread: 0.8 },
+  popcorn: { colors: [[1, 0.98, 0.85], [1, 0.9, 0.6], [1, 1, 1]], speed: [1, 3], up: [2, 5], size: [0.15, 0.3], life: [0.5, 0.9], gravity: -12, drag: 1, spread: 1 },
+  flame: { colors: [[1, 0.6, 0.15], [1, 0.8, 0.25], [1, 0.4, 0.1], [1, 0.95, 0.5]], speed: [0.5, 1.5], up: [1.5, 3.5], size: [0.3, 0.55], life: [0.3, 0.7], gravity: 3, drag: 1.5, spread: 0.7 },
+  spinring: { colors: [[0.85, 0.78, 0.6], [0.95, 0.9, 0.75], [0.75, 0.68, 0.5]], speed: [6, 9.5], up: [0.5, 2], size: [0.3, 0.6], life: [0.3, 0.6], gravity: -2, drag: 3.5, spread: 1 },
 };
 
 export class ParticleSystem {

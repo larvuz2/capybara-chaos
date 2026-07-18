@@ -92,6 +92,9 @@ export const PLAYER = {
   headbuttForce: 10,
   splashRange: 6.5, // AoE radius
   splashCd: 1.4,
+  spinRange: 4.5, // 360° spin attack radius
+  spinCd: 2.5,
+  spinCost: 25, // stamina
   iframesTime: 2.5,
   mudBoost: 1.28,
   mudTime: 6,
@@ -143,6 +146,51 @@ export const TUMBLE = {
   maxY: 3.0, // hard ceiling on the arc (juggling stays funny, not orbital)
 };
 
+// Spin attack: 360° radial launch — dust ring, tumbling tourists everywhere
+export const SPIN = {
+  force: 9.5, // radial knockback
+  vyMin: 3.4, // medium arc launch
+  vyMax: 4.8,
+  anim: 0.4, // seconds of visual spin (2 full turns)
+};
+
+// Smoker tourists: cigarette drops when tumbled → grass fire
+export const FIRE = {
+  lifetime: 25, // seconds until burn-out (leaves a scorch)
+  rainLifetime: 14, // rain event smothers fires faster
+  spreadMin: 4, // seconds between spread rolls
+  spreadMax: 7,
+  spreadChance: 0.35,
+  spreadRadius: 3, // new fire within this distance
+  maxFires: 6, // concurrent cap
+  minSep: 1.6, // min distance between fires
+  fearRadius: 6, // continuous fear AoE
+  fearRate: 0.85, // fear per second inside the AoE
+  extinguishTime: 3, // keeper stands on fire this long
+};
+
+// Popcorn spills: after a beat a seagull flock storms in, eats, leaves
+export const GULL = {
+  delay: 2, // seconds before the flock notices the spill
+  countMin: 4,
+  countMax: 6,
+  flyInTime: 2, // descent from high altitude
+  eatTime: 7, // hopping & pecking around the spill
+  fearRadius: 5, // flapping & squawking startles tourists
+  fearRate: 0.7,
+  landFear: 0.35, // startle burst per landing gull
+  landFearRadius: 4,
+};
+
+// Item carry rates (rest carry nothing). Smoker & popcorn drive emergent chaos.
+export const CARRY = {
+  soda: 0.22,
+  popcorn: 0.15,
+  icecream: 0.15,
+  selfie: 0.18,
+  smoke: 0.1,
+};
+
 // Photo tourists: approach a calm Munch for pictures
 export const PHOTO = {
   chance: 0.3, // fraction of tourists that spawn with a camera
@@ -184,27 +232,31 @@ export const KEEPER = {
 
 // Chaos stages — thresholds on the 0..100 chaos meter
 export const STAGES = [
-  { name: 'PEACEFUL', at: 0, color: '#7ed957', keepers: 0, keeperSpeed: 0, darts: false, drone: false, touristCap: 11, spawnEvery: 3.2 },
-  { name: 'SUSPICIOUS', at: 20, color: '#ffd93d', keepers: 1, keeperSpeed: KEEPER.walkSpeed, darts: false, drone: false, touristCap: 14, spawnEvery: 2.7 },
-  { name: 'ALARMED', at: 40, color: '#ff9f1c', keepers: 2, keeperSpeed: KEEPER.chaseSpeed, darts: false, drone: false, touristCap: 16, spawnEvery: 2.3 },
-  { name: 'CODE BROWN', at: 60, color: '#ff6b35', keepers: 2, keeperSpeed: KEEPER.sprintSpeed, darts: true, drone: false, touristCap: 17, spawnEvery: 2.1 },
-  { name: 'FULL ALERT', at: 75, color: '#e5383b', keepers: 3, keeperSpeed: KEEPER.sprintSpeed, darts: true, drone: true, touristCap: 17, spawnEvery: 2.0 },
-  { name: 'ZOO SWAT', at: 90, color: '#b5179e', keepers: 4, keeperSpeed: KEEPER.eliteSpeed, darts: true, drone: true, touristCap: 15, spawnEvery: 1.9 },
+  { name: 'PEACEFUL', at: 0, color: '#7ed957', keepers: 0, keeperSpeed: 0, darts: false, drone: false, touristCap: 13, spawnEvery: 3.2 },
+  { name: 'SUSPICIOUS', at: 20, color: '#ffd93d', keepers: 1, keeperSpeed: KEEPER.walkSpeed, darts: false, drone: false, touristCap: 16, spawnEvery: 2.7 },
+  { name: 'ALARMED', at: 40, color: '#ff9f1c', keepers: 2, keeperSpeed: KEEPER.chaseSpeed, darts: false, drone: false, touristCap: 18, spawnEvery: 2.3 },
+  { name: 'CODE BROWN', at: 60, color: '#ff6b35', keepers: 2, keeperSpeed: KEEPER.sprintSpeed, darts: true, drone: false, touristCap: 19, spawnEvery: 2.1 },
+  { name: 'FULL ALERT', at: 75, color: '#e5383b', keepers: 3, keeperSpeed: KEEPER.sprintSpeed, darts: true, drone: true, touristCap: 19, spawnEvery: 2.0 },
+  { name: 'ZOO SWAT', at: 90, color: '#b5179e', keepers: 4, keeperSpeed: KEEPER.eliteSpeed, darts: true, drone: true, touristCap: 17, spawnEvery: 1.9 },
 ] as const;
 
+// Chaos gain is deliberately slow: runs should last 3-6 minutes and the
+// first half minute stays genuinely peaceful. Stage thresholds unchanged.
 export const CHAOS = {
-  scare: 5,
-  pondFall: 8,
-  iceCream: 4,
-  stampede: 10,
-  selfie: 5,
-  trash: 5,
-  platform: 14,
-  cart: 12,
-  vip: 12,
-  bowling: 4,
-  strike: 8,
+  scare: 2,
+  pondFall: 4,
+  iceCream: 2,
+  stampede: 5,
+  selfie: 3,
+  trash: 3,
+  platform: 7,
+  cart: 6,
+  vip: 6,
+  bowling: 2,
+  strike: 4,
   photo: 0, // being photographed is not chaos
+  fire: 3, // per ignition (cigarette drop or spread)
+  gulls: 4, // per seagull swarm
   win: 100,
 };
 
@@ -221,6 +273,8 @@ export const SCORE = {
   bowling: 30, // 2+ tumbled in one chain
   strike: 60, // 3+ tumbled in one chain
   photo: 5, // tiny — photogs snap a calm Munch
+  fire: 15, // cigarette ignites the grass
+  gulls: 20, // popcorn spill summons a seagull swarm
 };
 
 export const COMBO = { window: 4.0, max: 8 };
