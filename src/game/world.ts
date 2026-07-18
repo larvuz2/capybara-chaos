@@ -8,11 +8,12 @@
 import {
   ARENA, POND, MUD, PLATFORM, GATES, HIDING_SPOTS, TRASH_CANS, CART_SPOT,
   PLAYER, TOURIST, KEEPER, STAGES, CHAOS, SCORE, COMBO, ECONOMY, TUMBLE, PHOTO, FLEE,
+  SPIN, FIRE, GULL, CARRY,
 } from './constants';
 import type {
   PlayerState, TouristState, KeeperState, DartState, FoodState, TrashCanState,
   CartState, DroneState, GameEvent, InputState, RunConfig, RunStats, HudSnapshot,
-  ItemKind,
+  ItemKind, FireState, SpillState, GullState, ScorchState,
 } from './types';
 import { emptyInput } from './types';
 
@@ -40,6 +41,11 @@ export class World {
   trashCans: TrashCanState[] = [];
   cart: CartState | null = null;
   drone: DroneState = { active: false, angle: 0, x: 0, z: 0, spotX: 0, spotZ: 0 };
+  // emergent chaos entities
+  fires = new Map<number, FireState>();
+  spills = new Map<number, SpillState>();
+  gulls = new Map<number, GullState>();
+  scorches: ScorchState[] = [];
 
   chaos = 0;
   score = 0;
@@ -67,6 +73,7 @@ export class World {
   private chainSeq = 0; // bowling-chain id source (one attack = one chain)
   private chargeChainId = 0; // chain id shared by all hits of one charge
   private chains = new Map<number, { n: number; t: number }>(); // chainId -> tumble count
+  private flockSeq = 0; // seagull flock id source (one spill = one flock)
 
   // ---- derived upgrade values -------------------------------------------
   private up(id: string): number {
@@ -136,15 +143,20 @@ export class World {
     this.chainSeq = 0;
     this.chargeChainId = 0;
     this.chains.clear();
-    this.stats = { scared: 0, pond: 0, icecream: 0, stampede: 0, selfie: 0, trash: 0, platform: 0, cart: 0, vip: 0, bowling: 0, strikes: 0, photos: 0, bestCombo: 0 };
+    this.flockSeq = 0;
+    this.fires.clear();
+    this.spills.clear();
+    this.gulls.clear();
+    this.scorches.length = 0;
+    this.stats = { scared: 0, pond: 0, icecream: 0, stampede: 0, selfie: 0, trash: 0, platform: 0, cart: 0, vip: 0, bowling: 0, strikes: 0, photos: 0, fires: 0, gulls: 0, bestCombo: 0 };
     this.drone = { active: false, angle: 0, x: 0, z: 0, spotX: 0, spotZ: 0 };
 
     this.player = {
       id: 0, x: 6, z: -8, vx: 0, vz: 0, facing: Math.PI,
       stamina: PLAYER.staminaMax, lives: PLAYER.lives,
       charging: false, hidden: false, muddy: 0, iframes: 0, slow: 0,
-      biteCd: 0, headbuttCd: 0, splashCd: 0, regenWait: 0,
-      animAttack: 0, animHeadbutt: 0, animSplash: 0, animRoll: 0, squish: 0,
+      biteCd: 0, headbuttCd: 0, splashCd: 0, spinCd: 0, regenWait: 0,
+      animAttack: 0, animHeadbutt: 0, animSplash: 0, animRoll: 0, animSpin: 0, squish: 0,
       dead: false,
     };
 
@@ -184,6 +196,9 @@ export class World {
       this.updateSpawning(dt);
     }
     this.updateFoods(dt);
+    this.updateFires(dt);
+    this.updateSpills(dt);
+    this.updateGulls(dt);
     this.updateStage();
 
     // combo decay
@@ -198,7 +213,8 @@ export class World {
       if (this.time - c.t > 5) this.chains.delete(id);
     }
 
-    // platform emptied check
+    // platform emptied check — only counts if Munch actually drove them off:
+    // if everyone just wandered away on their own, the prime simply resets
     if (!this.platformAwarded) {
       let onP = 0;
       for (const t of this.tourists.values()) {
@@ -206,10 +222,21 @@ export class World {
       }
       if (onP >= 3) this.platformPrimed = true;
       if (this.platformPrimed && onP === 0 && !this.config.attract) {
-        this.platformAwarded = true;
-        this.stats.platform++;
-        this.addScore(SCORE.platform, 0, 26, 'PLATFORM EMPTIED!', 'gold', CHAOS.platform);
-        this.emit({ kind: 'sfx', name: 'coin' });
+        let mischief = false;
+        for (const t of this.tourists.values()) {
+          if (t.mood === 'panic' || t.mood === 'flee' || t.mood === 'pond' || t.tumble > 0 || t.dazed > 0) {
+            mischief = true;
+            break;
+          }
+        }
+        if (mischief) {
+          this.platformAwarded = true;
+          this.stats.platform++;
+          this.addScore(SCORE.platform, 0, 26, 'PLATFORM EMPTIED!', 'gold', CHAOS.platform);
+          this.emit({ kind: 'sfx', name: 'coin' });
+        } else {
+          this.platformPrimed = false;
+        }
       }
     }
   }
@@ -225,6 +252,7 @@ export class World {
     p.biteCd = Math.max(0, p.biteCd - dt);
     p.headbuttCd = Math.max(0, p.headbuttCd - dt);
     p.splashCd = Math.max(0, p.splashCd - dt);
+    p.spinCd = Math.max(0, p.spinCd - dt);
     p.iframes = Math.max(0, p.iframes - dt);
     p.slow = Math.max(0, p.slow - dt);
     p.muddy = Math.max(0, p.muddy - dt);
@@ -232,6 +260,7 @@ export class World {
     p.animHeadbutt = Math.max(0, p.animHeadbutt - dt);
     p.animSplash = Math.max(0, p.animSplash - dt);
     p.animRoll = Math.max(0, p.animRoll - dt);
+    p.animSpin = Math.max(0, p.animSpin - dt);
     p.squish = Math.max(0, p.squish - dt * 4);
 
     // --- movement ---
@@ -308,6 +337,7 @@ export class World {
     if (input.headbutt && p.headbuttCd <= 0) this.doHeadbutt();
     if (input.hide) this.doHideRoll();
     if (input.splash && p.splashCd <= 0) this.doSplash();
+    if (input.spin) this.doSpin();
 
     // charge collisions: bowl through tourists → low fast tumble
     if (p.charging && speedNow > 7) {
@@ -472,6 +502,49 @@ export class World {
         this.dropItem(t, true);
         this.scareTourist(t, 'splash');
       }
+    }
+  }
+
+  /** 360° spin attack: radial launch on everyone in range, topples props. */
+  private doSpin(): void {
+    const p = this.player;
+    if (p.spinCd > 0 || p.stamina < PLAYER.spinCost) return;
+    p.spinCd = PLAYER.spinCd;
+    p.stamina -= PLAYER.spinCost;
+    p.regenWait = PLAYER.regenDelay;
+    p.animSpin = SPIN.anim;
+    p.squish = 1.2;
+    this.lastAttackTime = this.time;
+    const r = PLAYER.spinRange;
+    const chainId = ++this.chainSeq; // one spin = one bowling chain
+    this.emit({ kind: 'sfx', name: 'whoosh' });
+    this.emit({ kind: 'particles', preset: 'spinring', x: p.x, z: p.z, count: 34 });
+    this.emit({ kind: 'shake', mag: 0.45 });
+    let hitAny = false;
+    for (const t of this.tourists.values()) {
+      if (t.mood === 'gone' || t.mood === 'pond') continue;
+      if (dist2(p.x, p.z, t.x, t.z) > r * r) continue;
+      hitAny = true;
+      const ang = Math.atan2(t.x - p.x, t.z - p.z);
+      const f = SPIN.force * rand(0.9, 1.15);
+      this.scareTourist(t, 'spin');
+      this.startTumble(t, Math.sin(ang) * f, Math.cos(ang) * f, rand(SPIN.vyMin, SPIN.vyMax), rand(TUMBLE.spinMin, TUMBLE.spinMax), chainId);
+      if (t.item === 'selfie') this.destroySelfie(t);
+      else this.dropItem(t, true);
+      this.emit({ kind: 'particles', preset: 'hit', x: t.x, z: t.z });
+    }
+    if (hitAny) {
+      p.squish = 1.4;
+      this.emit({ kind: 'sfx', name: 'headbutt' });
+    }
+    // props topple in the vortex too
+    for (const c of this.trashCans) {
+      if (c.toppled) continue;
+      if (dist2(p.x, p.z, c.x, c.z) < r * r) this.toppleTrashCan(c);
+    }
+    if (this.cart && !this.cart.toppled) {
+      const cr = r + 1.2;
+      if (dist2(p.x, p.z, this.cart.x, this.cart.z) < cr * cr) this.toppleCart();
     }
   }
 
@@ -666,7 +739,9 @@ export class World {
     let x: number;
     let z: number;
     if (scatter) {
-      const s = this.randomSpotInEnclosure(3);
+      // initial scatter keeps the boardwalk clear (it fills via arrivals)
+      let s = this.randomSpotInEnclosure(3);
+      for (let i = 0; i < 8 && this.onPlatformRect(s.x, s.z); i++) s = this.randomSpotInEnclosure(3);
       x = s.x;
       z = s.z;
     } else {
@@ -695,10 +770,15 @@ export class World {
     let item: ItemKind = 'none';
     if (vip) item = 'selfie';
     else if (photog) item = 'camera';
-    else if (this.config.event === 'feeding' && itemRoll < 0.45) item = 'food';
-    else if (itemRoll < 0.28) item = 'soda';
-    else if (itemRoll < 0.45) item = 'icecream';
-    else if (itemRoll < 0.6) item = 'selfie';
+    else if (this.config.event === 'feeding' && itemRoll < 0.4) item = 'food';
+    else if (itemRoll < CARRY.soda) item = 'soda';
+    else if (itemRoll < CARRY.soda + CARRY.popcorn) item = 'popcorn';
+    else if (itemRoll < CARRY.soda + CARRY.popcorn + CARRY.icecream) item = 'icecream';
+    else if (itemRoll < CARRY.soda + CARRY.popcorn + CARRY.icecream + CARRY.selfie) item = 'selfie';
+    else if (itemRoll < CARRY.soda + CARRY.popcorn + CARRY.icecream + CARRY.selfie + CARRY.smoke) item = 'smoke';
+    // hair color: blonde common, pink/blue rare
+    const hcRoll = Math.random();
+    const hairColor = hcRoll < 0.32 ? 0 : hcRoll < 0.47 ? 1 : hcRoll < 0.67 ? 2 : hcRoll < 0.87 ? 3 : hcRoll < 0.95 ? 4 : hcRoll < 0.97 ? 5 : 6;
 
     const t: TouristState = {
       id, x, z, vx: 0, vz: 0, facing: rand(0, TAU),
@@ -708,7 +788,9 @@ export class World {
       scale, vip, item, dropped: false, onPlatform: false,
       fear: 0, slip: 0, soak: 0, bob: rand(0, TAU), screamed: false,
       eyeDart: rand(0, 2), pupilX: 0, pupilY: 0,
-      skin: Math.floor(rand(0, 5)), shirt: Math.floor(rand(0, 8)), pants: Math.floor(rand(0, 6)),
+      skin: Math.floor(rand(0, 5)), shirt: Math.floor(rand(0, 12)), pants: Math.floor(rand(0, 6)),
+      hair: Math.floor(rand(0, 8)), hairColor,
+      glasses: !vip && Math.random() < 0.25,
       hitCd: 0,
       tumble: 0, tumbleVX: 0, tumbleVZ: 0, tumbleVY: 0, tumbleY: 0,
       tumbleRot: 0, spin: 0, dazed: 0, chainId: 0,
@@ -745,7 +827,9 @@ export class World {
   }
 
   private dropItem(t: TouristState, force: boolean): void {
-    if (t.dropped || t.item === 'none' || t.item === 'food' || t.item === 'camera') return;
+    // popcorn & cigarettes never drop as snacks: they trigger fires/spills
+    // via startTumble instead
+    if (t.dropped || t.item === 'none' || t.item === 'food' || t.item === 'camera' || t.item === 'popcorn' || t.item === 'smoke') return;
     const chance = TOURIST.dropChance + (this.slippery ? 0.25 : 0);
     if (!force && Math.random() > chance) return;
     t.dropped = true;
@@ -860,9 +944,11 @@ export class World {
       let desiredZ = 0;
       let desiredSpeed = 0;
 
-      // photo tourists: Munch looks calm → sneak over for a picture
+      // photo tourists (and selfie-stick carriers): Munch looks calm →
+      // sneak over for a picture
+      const wantsPhoto = !t.vip && (t.photog || t.item === 'selfie');
       if (
-        t.photog && t.photoCd <= 0 && !p.dead &&
+        wantsPhoto && t.photoCd <= 0 && !p.dead &&
         (t.mood === 'wander' || t.mood === 'gawk' || t.mood === 'arrive' || t.mood === 'feed') &&
         !p.charging && this.time - this.lastAttackTime > PHOTO.calmTime &&
         dist2(t.x, t.z, p.x, p.z) < PHOTO.range * PHOTO.range
@@ -1114,10 +1200,29 @@ export class World {
 
       // --- fear accumulation ---
       if (t.mood !== 'panic' && t.mood !== 'flee' && t.mood !== 'pond' && t.mood !== 'gone') {
-        // intimidation aura
+        // Intimidation aura — ONLY while Munch is actually menacing:
+        // charging, fresh from an attack (<2s), or barreling along (>5 m/s).
+        // A standing, peaceful capybara scares NOBODY: tourists wander,
+        // gawk, feed him and snap photos right next to him.
         const sr = this.scareRadius * t.scale + 0.8;
-        if (!this.config.attract && dist2(t.x, t.z, p.x, p.z) < sr * sr) {
+        const pSpeed = Math.hypot(p.vx, p.vz);
+        const menacing = p.charging || this.time - this.lastAttackTime < 2 || pSpeed > 5;
+        if (!this.config.attract && menacing && dist2(t.x, t.z, p.x, p.z) < sr * sr) {
           t.fear += dt * 0.55 * (1 - t.bravery * 0.6) * (p.charging ? 2.2 : 1);
+        }
+        // grass fires are terrifying (emergent panic source)
+        for (const f of this.fires.values()) {
+          if (dist2(t.x, t.z, f.x, f.z) < FIRE.fearRadius * FIRE.fearRadius) {
+            t.fear += dt * FIRE.fearRate * (1 - t.bravery * 0.5);
+            break;
+          }
+        }
+        // flapping seagulls on the ground startle everyone close by
+        for (const g of this.gulls.values()) {
+          if (g.phase === 'eat' && dist2(t.x, t.z, g.x, g.z) < GULL.fearRadius * GULL.fearRadius) {
+            t.fear += dt * GULL.fearRate * (1 - t.bravery * 0.5);
+            break;
+          }
         }
         // chain panic: nearby panicking tourists are contagious
         for (const o of this.tourists.values()) {
@@ -1175,6 +1280,19 @@ export class World {
   // =========================================================================
   private startTumble(t: TouristState, vx: number, vz: number, vy: number, spin: number, chainId: number): void {
     const relaunch = t.tumble > 0 || t.dazed > 0; // juggled again: keep old chain
+    if (!relaunch) {
+      // emergent drops: the smoker's cigarette ignites the grass, the
+      // popcorn bucket spills and summons seagulls
+      if (t.item === 'smoke') {
+        t.item = 'none';
+        t.dropped = true;
+        this.igniteFire(t.x, t.z);
+      } else if (t.item === 'popcorn') {
+        t.item = 'none';
+        t.dropped = true;
+        this.spawnSpill(t.x, t.z);
+      }
+    }
     t.tumble = TUMBLE.maxTime;
     t.tumbleVX = vx;
     t.tumbleVZ = vz;
@@ -1370,7 +1488,7 @@ export class World {
       vx: 0, vz: 0, facing: Math.PI / 2,
       mood: 'patrol', t: 0,
       tx: rand(-15, 15), tz: rand(-15, 15),
-      elite, memory: 0, dartCd: rand(1, 3), bob: rand(0, TAU),
+      elite, memory: 0, dartCd: rand(1, 3), bob: rand(0, TAU), fireId: -1,
     };
     this.keepers.set(id, k);
     this.emit({ kind: 'sfx', name: 'alarm' });
@@ -1419,6 +1537,28 @@ export class World {
           k.mood = 'investigate';
           k.tx = p.x + rand(-2, 2);
           k.tz = p.z + rand(-2, 2);
+          k.t = 0;
+        }
+      }
+
+      // firefighters: idle keepers divert to the nearest unclaimed fire.
+      // (Chasing keepers keep chasing — fire-vs-player tension is the point.)
+      if ((k.mood === 'patrol' || k.mood === 'investigate') && this.fires.size > 0) {
+        let best: FireState | null = null;
+        let bd = Infinity;
+        for (const f of this.fires.values()) {
+          const claimK = f.keeperId >= 0 ? this.keepers.get(f.keeperId) : undefined;
+          if (claimK && claimK !== k && claimK.mood === 'fire' && claimK.fireId === f.id) continue; // already handled
+          const d2f = dist2(k.x, k.z, f.x, f.z);
+          if (d2f < bd) {
+            bd = d2f;
+            best = f;
+          }
+        }
+        if (best) {
+          best.keeperId = k.id;
+          k.fireId = best.id;
+          k.mood = 'fire';
           k.t = 0;
         }
       }
@@ -1473,6 +1613,45 @@ export class World {
             k.t = 0;
             k.dartCd = KEEPER.dartCd;
             this.fireDart(k);
+          }
+          break;
+        }
+        case 'fire': {
+          const f = this.fires.get(k.fireId);
+          if (!f) {
+            // fire already gone (burned out or handled) — back to work
+            k.fireId = -1;
+            k.mood = 'patrol';
+            k.t = 0;
+            const s = this.randomSpotInEnclosure(4);
+            k.tx = s.x;
+            k.tz = s.z;
+            break;
+          }
+          tx = f.x;
+          tz = f.z;
+          if (dist2(k.x, k.z, f.x, f.z) > 1.44) {
+            speed = Math.max(KEEPER.chaseSpeed, st.keeperSpeed); // hurry!
+          } else {
+            // stand on the flames and stomp them out
+            speed = 0;
+            f.outT += dt;
+            if (Math.random() < dt * 6) {
+              this.emit({ kind: 'particles', preset: 'steam', x: f.x, z: f.z, count: 2 });
+            }
+            if (f.outT >= FIRE.extinguishTime) {
+              this.fires.delete(f.id);
+              this.leaveScorch(f);
+              this.emit({ kind: 'sfx', name: 'sizzle', x: f.x, z: f.z });
+              this.emit({ kind: 'particles', preset: 'steam', x: f.x, z: f.z, count: 14 });
+              this.emit({ kind: 'popup', x: f.x, z: f.z, text: 'FIRE OUT', cls: 'info' });
+              k.fireId = -1;
+              k.mood = 'patrol';
+              k.t = 0;
+              const s = this.randomSpotInEnclosure(4);
+              k.tx = s.x;
+              k.tz = s.z;
+            }
           }
           break;
         }
@@ -1630,6 +1809,163 @@ export class World {
     for (const f of [...this.foods.values()]) {
       f.ttl -= dt;
       if (f.ttl <= 0) this.foods.delete(f.id);
+    }
+  }
+
+  // =========================================================================
+  // Emergent chaos: grass fires, popcorn spills & seagull swarms
+  // =========================================================================
+  /** A dropped cigarette hits the ground → new fire if the spot can burn. */
+  private igniteFire(x: number, z: number): void {
+    if (this.fires.size >= FIRE.maxFires) return;
+    // only open grass burns: no pond, no boardwalk, no tourist path
+    if (this.inPond(x, z, 0.8)) return;
+    if (this.onPlatformRect(x, z)) return;
+    if (Math.abs(x) > ARENA.half - 1.2 || Math.abs(z) > ARENA.half - 1.2) return;
+    for (const f of this.fires.values()) {
+      if (dist2(x, z, f.x, f.z) < FIRE.minSep * FIRE.minSep) return;
+    }
+    const id = this.nextId++;
+    this.fires.set(id, {
+      id, x, z, t: 0,
+      ttl: this.slippery ? FIRE.rainLifetime : FIRE.lifetime,
+      spreadT: rand(FIRE.spreadMin, FIRE.spreadMax),
+      outT: 0,
+      keeperId: -1,
+    });
+    this.stats.fires++;
+    this.addScore(SCORE.fire, x, z, 'FIRE!', 'gold', CHAOS.fire);
+    this.emit({ kind: 'sfx', name: 'fire', x, z });
+    this.emit({ kind: 'particles', preset: 'flame', x, z, count: 14 });
+  }
+
+  private leaveScorch(f: FireState): void {
+    this.scorches.push({ id: f.id, x: f.x, z: f.z });
+    if (this.scorches.length > 16) this.scorches.shift();
+  }
+
+  private updateFires(dt: number): void {
+    for (const f of [...this.fires.values()]) {
+      f.t += dt;
+      f.ttl -= dt;
+      // ambient smoke & occasional crackle
+      if (Math.random() < dt * 4) this.emit({ kind: 'particles', preset: 'smoke', x: f.x, z: f.z, count: 1 });
+      if (Math.random() < dt * 0.25) this.emit({ kind: 'sfx', name: 'fire', x: f.x, z: f.z });
+      // chance to spread to a neighbouring grass point
+      f.spreadT -= dt;
+      if (f.spreadT <= 0) {
+        f.spreadT = rand(FIRE.spreadMin, FIRE.spreadMax);
+        if (this.fires.size < FIRE.maxFires && Math.random() < FIRE.spreadChance) {
+          const a = rand(0, TAU);
+          const d = rand(1.4, FIRE.spreadRadius);
+          this.igniteFire(f.x + Math.sin(a) * d, f.z + Math.cos(a) * d);
+        }
+      }
+      // burns out → scorch decal
+      if (f.ttl <= 0) {
+        this.fires.delete(f.id);
+        this.leaveScorch(f);
+        this.emit({ kind: 'particles', preset: 'smoke', x: f.x, z: f.z, count: 10 });
+      }
+    }
+  }
+
+  /** A tumbled popcorn bucket leaves a spill that summons seagulls. */
+  private spawnSpill(x: number, z: number): void {
+    const id = this.nextId++;
+    this.spills.set(id, {
+      id, x, z, t: 0,
+      ttl: GULL.delay + GULL.flyInTime + GULL.eatTime + 3,
+      flockSpawned: false,
+    });
+    this.emit({ kind: 'sfx', name: 'drop', x, z });
+    this.emit({ kind: 'particles', preset: 'popcorn', x, z, count: 12 });
+  }
+
+  private updateSpills(dt: number): void {
+    for (const s of [...this.spills.values()]) {
+      s.t += dt;
+      if (!s.flockSpawned && s.t >= GULL.delay) {
+        s.flockSpawned = true;
+        this.summonGulls(s);
+      }
+      if (s.t >= s.ttl) this.spills.delete(s.id);
+    }
+  }
+
+  /** A flock of seagulls storms the spill: swoop in, feast, flap away. */
+  private summonGulls(s: SpillState): void {
+    const n = Math.floor(rand(GULL.countMin, GULL.countMax + 1));
+    const flock = ++this.flockSeq;
+    for (let i = 0; i < n; i++) {
+      const gid = this.nextId++;
+      const a = rand(0, TAU);
+      const d = rand(10, 16);
+      const sx = s.x + Math.sin(a) * d;
+      const sz = s.z + Math.cos(a) * d;
+      const sy = rand(14, 18);
+      this.gulls.set(gid, {
+        id: gid, flock,
+        x: sx, y: sy, z: sz, sx, sy, sz,
+        tx: s.x + rand(-1.4, 1.4), tz: s.z + rand(-1.4, 1.4),
+        phase: 'in', t: 0, hopT: rand(0.2, 0.8), seed: rand(0, TAU),
+      });
+    }
+    this.stats.gulls++;
+    this.addScore(SCORE.gulls, s.x, s.z, 'SEAGULL SWARM', 'gold', CHAOS.gulls);
+    this.emit({ kind: 'sfx', name: 'squawk', x: s.x, z: s.z });
+  }
+
+  private updateGulls(dt: number): void {
+    for (const g of [...this.gulls.values()]) {
+      g.t += dt;
+      if (g.phase === 'in') {
+        // swoop down from the sky over flyInTime seconds (ease-out + wobble)
+        const k = clamp(g.t / GULL.flyInTime, 0, 1);
+        const e = 1 - (1 - k) * (1 - k);
+        g.x = g.sx + (g.tx - g.sx) * e + Math.sin(k * 9 + g.seed) * 0.6 * (1 - k);
+        g.z = g.sz + (g.tz - g.sz) * e + Math.cos(k * 7 + g.seed) * 0.6 * (1 - k);
+        g.y = g.sy * (1 - e);
+        if (k >= 1) {
+          g.phase = 'eat';
+          g.t = 0;
+          g.y = 0;
+          // reuse the start fields as the hop anchor around the landing spot
+          g.sx = g.tx;
+          g.sz = g.tz;
+          // landing startle: flapping wings right in a tourist's face
+          this.scareArea(g.x, g.z, GULL.landFearRadius, GULL.landFear);
+          this.emit({ kind: 'particles', preset: 'dust', x: g.x, z: g.z, count: 3 });
+          if (Math.random() < 0.5) this.emit({ kind: 'sfx', name: 'squawk', x: g.x, z: g.z });
+        }
+      } else if (g.phase === 'eat') {
+        // hop around the spill, pecking at popcorn
+        g.hopT -= dt;
+        if (g.hopT <= 0) {
+          g.hopT = rand(0.4, 1.1);
+          g.tx = g.sx + rand(-1.2, 1.2);
+          g.tz = g.sz + rand(-1.2, 1.2);
+        }
+        const dx = g.tx - g.x;
+        const dz = g.tz - g.z;
+        const dl = Math.hypot(dx, dz);
+        if (dl > 0.05) {
+          const sp = 2.2;
+          g.x += (dx / dl) * Math.min(sp * dt, dl);
+          g.z += (dz / dl) * Math.min(sp * dt, dl);
+        }
+        if (Math.random() < dt * 0.25) this.emit({ kind: 'sfx', name: 'squawk', x: g.x, z: g.z });
+        if (g.t >= GULL.eatTime) {
+          g.phase = 'out';
+          g.t = 0;
+        }
+      } else {
+        // flap away and despawn
+        g.y += 9 * dt;
+        g.x += Math.sin(g.seed) * 7 * dt;
+        g.z += Math.cos(g.seed) * 7 * dt;
+        if (g.y > 20) this.gulls.delete(g.id);
+      }
     }
   }
 
